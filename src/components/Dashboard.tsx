@@ -1,155 +1,349 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTelemetrySocket } from '../services/useTelemetrySocket';
 import { MetricsState, MetricsMessage } from '../types/metrics';
 import SymbolRow from './SymbolRow';
 import MobileSymbolCard from './MobileSymbolCard';
 
-/**
- * Dashboard component implementing the original Orderflow Matrix UI.  It
- * manages the list of active trading pairs, fetches available pairs
- * from Binance for selection and renders either a desktop table or
- * mobile cards.  Orderflow metrics are obtained via the telemetry
- * WebSocket using the useTelemetrySocket hook.  No metrics are
- * computed on the client; the UI merely renders values provided by
- * the server.
- */
+type ConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
+
+interface ExecutionStatus {
+  connection: {
+    state: ConnectionState;
+    executionEnabled: boolean;
+    hasCredentials: boolean;
+    symbols: string[];
+    lastError: string | null;
+  };
+  selectedSymbol: string | null;
+  settings: {
+    initialBalanceUsdt: number;
+    walletUsagePercent: number;
+    leverage: number;
+  };
+  wallet: {
+    totalWalletUsdt: number;
+    availableBalanceUsdt: number;
+    realizedPnl: number;
+    unrealizedPnl: number;
+    totalPnl: number;
+  };
+  openPosition: {
+    side: 'LONG' | 'SHORT';
+    size: number;
+    entryPrice: number;
+    leverage: number;
+  } | null;
+}
+
+const defaultExecutionStatus: ExecutionStatus = {
+  connection: {
+    state: 'DISCONNECTED',
+    executionEnabled: false,
+    hasCredentials: false,
+    symbols: [],
+    lastError: null,
+  },
+  selectedSymbol: null,
+  settings: {
+    initialBalanceUsdt: 1000,
+    walletUsagePercent: 10,
+    leverage: 10,
+  },
+  wallet: {
+    totalWalletUsdt: 0,
+    availableBalanceUsdt: 0,
+    realizedPnl: 0,
+    unrealizedPnl: 0,
+    totalPnl: 0,
+  },
+  openPosition: null,
+};
+
+const formatNum = (n: number, d = 2) => n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+
 export const Dashboard: React.FC = () => {
-  // Default pairs to display when the page loads
-  const [selectedPairs, setSelectedPairs] = useState<string[]>(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
-  // All available USDT perpetual pairs from Binance
+  const [selectedPair, setSelectedPair] = useState<string>('BTCUSDT');
   const [availablePairs, setAvailablePairs] = useState<string[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [isDropdownOpen, setDropdownOpen] = useState(false);
   const [isLoadingPairs, setIsLoadingPairs] = useState(true);
-  // Whether to show latency debug values in the UI
-  const [showLatency, setShowLatency] = useState(false);
 
-  // Connect to telemetry WebSocket for selected pairs
-  const marketData: MetricsState = useTelemetrySocket(selectedPairs);
+  const [apiKey, setApiKey] = useState('');
+  const [apiSecret, setApiSecret] = useState('');
+  const [connectionError, setConnectionError] = useState<string | null>(null);
 
-  // Fetch list of USDT perpetual symbols from Binance once on mount.
+  const [initialBalanceUsdt, setInitialBalanceUsdt] = useState<number>(1000);
+  const [walletUsagePercent, setWalletUsagePercent] = useState<number>(10);
+  const [leverage, setLeverage] = useState<number>(10);
+
+  const [executionStatus, setExecutionStatus] = useState<ExecutionStatus>(defaultExecutionStatus);
+
+  const activeSymbols = useMemo(() => [selectedPair], [selectedPair]);
+  const marketData: MetricsState = useTelemetrySocket(activeSymbols);
+
+  const hostname = window.location.hostname;
+  const proxyUrl = (import.meta as any).env?.VITE_PROXY_API || `http://${hostname}:8787`;
+
   useEffect(() => {
     const fetchPairs = async () => {
       try {
-        const hostname = window.location.hostname;
-        const proxyUrl = (import.meta as any).env?.VITE_PROXY_API || `http://${hostname}:8787`;
-        const res = await fetch(`${proxyUrl}/api/exchange-info`);
+        const res = await fetch(`${proxyUrl}/api/testnet/exchange-info`);
         const data = await res.json();
-        // Proxy already returns { symbols: string[] }
-        setAvailablePairs(data.symbols);
-        setIsLoadingPairs(false);
-      } catch (err) {
-        console.error('Failed to fetch pairs', err);
-        // Fallback list
-        setAvailablePairs(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'BNBUSDT']);
+        const pairs = Array.isArray(data?.symbols) ? data.symbols : [];
+        setAvailablePairs(pairs);
+        if (pairs.length > 0 && !pairs.includes(selectedPair)) {
+          setSelectedPair(pairs[0]);
+        }
+      } catch {
+        setAvailablePairs(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+      } finally {
         setIsLoadingPairs(false);
       }
     };
-    fetchPairs();
-  }, []);
 
-  const togglePair = (pair: string) => {
-    if (selectedPairs.includes(pair)) {
-      setSelectedPairs(selectedPairs.filter(p => p !== pair));
-    } else {
-      setSelectedPairs([...selectedPairs, pair]);
+    fetchPairs();
+  }, [proxyUrl]);
+
+  useEffect(() => {
+    const pollStatus = async () => {
+      try {
+        const res = await fetch(`${proxyUrl}/api/execution/status`);
+        const data = (await res.json()) as ExecutionStatus;
+        setExecutionStatus(data);
+        setInitialBalanceUsdt(data.settings.initialBalanceUsdt);
+        setWalletUsagePercent(data.settings.walletUsagePercent);
+        setLeverage(data.settings.leverage);
+      } catch {
+        // no-op: keep last known state
+      }
+    };
+
+    pollStatus();
+    const timer = window.setInterval(pollStatus, 2000);
+    return () => window.clearInterval(timer);
+  }, [proxyUrl]);
+
+  useEffect(() => {
+    const syncSelectedSymbol = async () => {
+      try {
+        await fetch(`${proxyUrl}/api/execution/symbol`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: selectedPair }),
+        });
+      } catch {
+        // ignore and retry on next change
+      }
+    };
+    syncSelectedSymbol();
+  }, [proxyUrl, selectedPair]);
+
+  const filteredPairs = availablePairs.filter((p) => p.includes(searchTerm.toUpperCase()));
+
+  const connectTestnet = async () => {
+    setConnectionError(null);
+    try {
+      const res = await fetch(`${proxyUrl}/api/execution/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey, apiSecret }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || 'connect_failed');
+      }
+      setExecutionStatus(data.status as ExecutionStatus);
+    } catch (e: any) {
+      setConnectionError(e.message || 'connect_failed');
     }
   };
 
-  const filteredPairs = availablePairs.filter(p => p.includes(searchTerm.toUpperCase()));
+  const disconnectTestnet = async () => {
+    setConnectionError(null);
+    try {
+      const res = await fetch(`${proxyUrl}/api/execution/disconnect`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || 'disconnect_failed');
+      }
+      setExecutionStatus(data.status as ExecutionStatus);
+    } catch (e: any) {
+      setConnectionError(e.message || 'disconnect_failed');
+    }
+  };
+
+  const toggleExecution = async (enabled: boolean) => {
+    const res = await fetch(`${proxyUrl}/api/execution/enabled`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      setExecutionStatus(data.status as ExecutionStatus);
+    }
+  };
+
+  const saveSettings = async () => {
+    const res = await fetch(`${proxyUrl}/api/execution/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initialBalanceUsdt, walletUsagePercent, leverage }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      setExecutionStatus(data.status as ExecutionStatus);
+    }
+  };
+
+  const statusColor = executionStatus.connection.state === 'CONNECTED'
+    ? 'text-green-400'
+    : executionStatus.connection.state === 'ERROR'
+    ? 'text-red-400'
+    : 'text-zinc-400';
 
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-200 font-sans p-6">
-      <div className="max-w-7xl mx-auto">
-        {/* Header Section */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+      <div className="max-w-7xl mx-auto space-y-6">
+        <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-white tracking-tight">Orderflow Matrix</h1>
-            <p className="text-zinc-500 text-sm mt-1">Real‑time Orderflow Telemetry</p>
+            <p className="text-zinc-500 text-sm mt-1">DATA: MAINNET | EXECUTION: TESTNET</p>
           </div>
-          {/* Pair Selector */}
-          <div className="relative z-50">
+          <div className="text-xs rounded border border-zinc-700 px-3 py-2 bg-zinc-900">
+            {executionStatus.connection.executionEnabled ? (
+              <span className="text-green-400">Execution ON</span>
+            ) : (
+              <span className="text-amber-300">Execution OFF (orders blocked)</span>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
+            <h2 className="text-sm font-semibold text-zinc-300">API & Execution</h2>
+            <input
+              type="password"
+              placeholder="Testnet API Key"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
+            />
+            <input
+              type="password"
+              placeholder="Testnet API Secret"
+              value={apiSecret}
+              onChange={(e) => setApiSecret(e.target.value)}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
+            />
+            <div className="flex gap-2">
+              <button onClick={connectTestnet} className="px-3 py-2 bg-blue-700 hover:bg-blue-600 rounded text-xs font-semibold">Connect Testnet</button>
+              <button onClick={disconnectTestnet} className="px-3 py-2 bg-zinc-700 hover:bg-zinc-600 rounded text-xs font-semibold">Disconnect</button>
+            </div>
+            <div className="text-xs">
+              Status: <span className={statusColor} title={executionStatus.connection.lastError || ''}>{executionStatus.connection.state}</span>
+            </div>
+            {connectionError && <div className="text-xs text-red-400">{connectionError}</div>}
+            <label className="flex items-center justify-between text-xs pt-2 border-t border-zinc-800">
+              <span>Execution Enabled</span>
+              <input
+                type="checkbox"
+                checked={executionStatus.connection.executionEnabled}
+                onChange={(e) => toggleExecution(e.target.checked)}
+                className="accent-green-500"
+              />
+            </label>
+          </div>
+
+          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
+            <h2 className="text-sm font-semibold text-zinc-300">Pair Selection</h2>
+            <p className="text-[11px] text-zinc-500">Pair list source: TESTNET futures exchangeInfo. Data stream: MAINNET metrics.</p>
             <button
-              onClick={() => setDropdownOpen(!isDropdownOpen)}
-              className="flex items-center space-x-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-white px-4 py-2 rounded-lg transition-all text-sm font-medium"
+              onClick={() => setDropdownOpen((v) => !v)}
+              className="w-full flex items-center justify-between bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-sm"
             >
-              <span>{isLoadingPairs ? 'Loading Pairs...' : 'Select Pairs'}</span>
-              <span className="bg-zinc-700 text-xs px-1.5 py-0.5 rounded-full">{selectedPairs.length}</span>
-              <svg className="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+              <span>{isLoadingPairs ? 'Loading testnet pairs...' : selectedPair}</span>
+              <span>▾</span>
             </button>
             {isDropdownOpen && !isLoadingPairs && (
-              <div className="absolute right-0 mt-2 w-64 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl overflow-hidden flex flex-col z-[100]">
-                <div className="p-2 border-b border-zinc-800">
-                  <input
-                    type="text"
-                    placeholder="Search..."
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-blue-500"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    autoFocus
-                  />
-                </div>
-                <div className="max-h-60 overflow-y-auto p-2 space-y-1">
-                  {filteredPairs.map(pair => (
-                    <div
+              <div className="border border-zinc-800 rounded bg-zinc-950 p-2 space-y-2">
+                <input
+                  type="text"
+                  placeholder="Search pair"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full bg-black border border-zinc-800 rounded px-2 py-1 text-xs"
+                />
+                <div className="max-h-56 overflow-y-auto space-y-1">
+                  {filteredPairs.map((pair) => (
+                    <button
                       key={pair}
-                      onClick={() => togglePair(pair)}
-                      className={`flex items-center justify-between px-3 py-2 rounded cursor-pointer text-sm ${selectedPairs.includes(pair) ? 'bg-blue-900/30 text-blue-400' : 'hover:bg-zinc-800 text-zinc-400'}`}
+                      onClick={() => {
+                        setSelectedPair(pair);
+                        setDropdownOpen(false);
+                      }}
+                      className={`w-full text-left px-2 py-1 rounded text-xs ${pair === selectedPair ? 'bg-blue-900/40 text-blue-300' : 'hover:bg-zinc-800 text-zinc-400'}`}
                     >
-                      <span>{pair}</span>
-                      {selectedPairs.includes(pair) && (
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                      )}
-                    </div>
+                      {pair}
+                    </button>
                   ))}
-                  {filteredPairs.length === 0 && (
-                    <div className="p-2 text-center text-xs text-zinc-500">No pairs found</div>
-                  )}
                 </div>
               </div>
             )}
           </div>
-          {/* Latency toggle */}
-          <label className="flex items-center space-x-2 text-xs cursor-pointer">
-            <input
-              type="checkbox"
-              checked={showLatency}
-              onChange={(e) => setShowLatency(e.target.checked)}
-              className="accent-blue-600"
-            />
-            <span>Show Latency</span>
-          </label>
+
+          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
+            <h2 className="text-sm font-semibold text-zinc-300">Risk & Capital</h2>
+            <label className="text-xs text-zinc-400 block">Initial Balance (USDT)</label>
+            <input type="number" value={initialBalanceUsdt} onChange={(e) => setInitialBalanceUsdt(Number(e.target.value || 0))} className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm" />
+            <label className="text-xs text-zinc-400 block">Wallet Usage (%)</label>
+            <input type="number" min={0} max={100} value={walletUsagePercent} onChange={(e) => setWalletUsagePercent(Number(e.target.value || 0))} className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm" />
+            <label className="text-xs text-zinc-400 block">Leverage (no hard cap, env MAX_LEVERAGE applies)</label>
+            <input type="number" min={1} value={leverage} onChange={(e) => setLeverage(Number(e.target.value || 1))} className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm" />
+            <button onClick={saveSettings} className="w-full px-3 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-xs font-semibold">Apply Settings</button>
+          </div>
         </div>
-        {/* Mobile View (Cards) */}
-        <div className="md:hidden space-y-3 mb-8">
-          {selectedPairs.map(symbol => {
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+            <h2 className="text-sm font-semibold text-zinc-300 mb-2">Wallet & PnL (Testnet Execution Events)</h2>
+            <div className="grid grid-cols-2 gap-y-2 text-xs">
+              <div className="text-zinc-500">Total Wallet</div><div className="text-right font-mono">{formatNum(executionStatus.wallet.totalWalletUsdt)} USDT</div>
+              <div className="text-zinc-500">Available</div><div className="text-right font-mono">{formatNum(executionStatus.wallet.availableBalanceUsdt)} USDT</div>
+              <div className="text-zinc-500">Realized PnL</div><div className={`text-right font-mono ${executionStatus.wallet.realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatNum(executionStatus.wallet.realizedPnl)}</div>
+              <div className="text-zinc-500">Unrealized PnL</div><div className={`text-right font-mono ${executionStatus.wallet.unrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatNum(executionStatus.wallet.unrealizedPnl)}</div>
+              <div className="text-zinc-500">Total PnL</div><div className={`text-right font-mono ${executionStatus.wallet.totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatNum(executionStatus.wallet.totalPnl)}</div>
+            </div>
+          </div>
+
+          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+            <h2 className="text-sm font-semibold text-zinc-300 mb-2">Open Position</h2>
+            {executionStatus.openPosition ? (
+              <div className="grid grid-cols-2 gap-y-2 text-xs">
+                <div className="text-zinc-500">Side</div><div className="text-right font-mono">{executionStatus.openPosition.side}</div>
+                <div className="text-zinc-500">Size</div><div className="text-right font-mono">{formatNum(executionStatus.openPosition.size, 6)}</div>
+                <div className="text-zinc-500">Entry Price</div><div className="text-right font-mono">{formatNum(executionStatus.openPosition.entryPrice)}</div>
+                <div className="text-zinc-500">Leverage</div><div className="text-right font-mono">{formatNum(executionStatus.openPosition.leverage, 1)}x</div>
+              </div>
+            ) : (
+              <div className="text-xs text-zinc-500">No open position</div>
+            )}
+          </div>
+        </div>
+
+        <div className="md:hidden space-y-3 mb-4">
+          {activeSymbols.map((symbol) => {
             const msg: MetricsMessage | undefined = marketData[symbol];
             if (!msg) return null;
-            if (!msg) return null;
-            // Also log to verify data structure
-            if (symbol === 'BTCUSDT') {
-              console.log('[Dashboard] Rendering BTCUSDT', msg.bids?.length, msg.asks?.length);
-            }
-            return <MobileSymbolCard key={symbol} symbol={symbol} metrics={msg} showLatency={showLatency} />;
+            return <MobileSymbolCard key={symbol} symbol={symbol} metrics={msg} showLatency={false} />;
           })}
-          {selectedPairs.length === 0 && (
-            <div className="p-8 text-center text-zinc-600 bg-zinc-900/50 rounded-lg border border-zinc-800 border-dashed">
-              Select a trading pair to begin.
-            </div>
-          )}
         </div>
-        {/* Desktop View (Table) */}
+
         <div className="hidden md:block border border-zinc-800 rounded-xl overflow-hidden bg-zinc-900/80">
           <div className="overflow-x-auto">
             <div className="min-w-[900px]">
-              {/* Table Header - Fixed Width Columns */}
-              <div
-                className="grid gap-0 px-4 py-3 text-xs font-bold text-zinc-400 uppercase tracking-wider bg-zinc-900/80 border-b border-zinc-700 sticky top-0 z-10"
-                style={{ gridTemplateColumns: '120px 100px 110px 90px 90px 100px 80px 90px' }}
-              >
-                <div className="flex items-center gap-2">
-                  <span>Symbol</span>
-                </div>
+              <div className="grid gap-0 px-4 py-3 text-xs font-bold text-zinc-400 uppercase tracking-wider bg-zinc-900/80 border-b border-zinc-700" style={{ gridTemplateColumns: '120px 100px 110px 90px 90px 100px 80px 90px' }}>
+                <div>Symbol</div>
                 <div className="text-right font-mono">Price</div>
                 <div className="text-right font-mono">OI / Δ</div>
                 <div className="text-center">OBI (W)</div>
@@ -158,30 +352,21 @@ export const Dashboard: React.FC = () => {
                 <div className="text-center">Signal</div>
                 <div className="text-right">Status</div>
               </div>
-              {/* Table Body */}
               <div className="bg-black/20 divide-y divide-zinc-800/50">
-                {selectedPairs.map(symbol => {
+                {activeSymbols.map((symbol) => {
                   const msg: MetricsMessage | undefined = marketData[symbol];
                   if (!msg) return null;
-                  return <SymbolRow key={symbol} symbol={symbol} data={msg} showLatency={showLatency} />;
+                  return <SymbolRow key={symbol} symbol={symbol} data={msg} showLatency={false} />;
                 })}
-                {selectedPairs.length === 0 && (
-                  <div className="p-12 text-center text-zinc-600">
-                    Select a trading pair to begin monitoring.
-                  </div>
-                )}
-                {Object.keys(marketData).length === 0 && selectedPairs.length > 0 && (
-                  <div className="p-12 text-center text-zinc-500 animate-pulse">
-                    Connecting to telemetry server...
-                  </div>
+                {Object.keys(marketData).length === 0 && (
+                  <div className="p-12 text-center text-zinc-500 animate-pulse">Connecting to MAINNET market data...</div>
                 )}
               </div>
             </div>
           </div>
         </div>
-        <div className="mt-6 text-xs text-zinc-600 text-center">
-          Data provided via backend telemetry. All calculations are performed server‑side.
-        </div>
+
+        <div className="text-xs text-zinc-600 text-center">Market data source is always MAINNET. Execution route is always TESTNET.</div>
       </div>
     </div>
   );

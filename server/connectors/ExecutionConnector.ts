@@ -12,6 +12,7 @@ import {
 } from './executionTypes';
 
 type ExecutionListener = (event: ExecutionEvent) => void;
+type StatusListener = (status: ExecutionConnectorStatus) => void;
 
 type UserDataMessage = {
   e?: string;
@@ -20,9 +21,21 @@ type UserDataMessage = {
   a?: any;
 };
 
+export type ExecutionConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
+
+export interface ExecutionConnectorStatus {
+  state: ExecutionConnectionState;
+  executionEnabled: boolean;
+  hasCredentials: boolean;
+  symbols: string[];
+  lastError: string | null;
+  updatedAtMs: number;
+}
+
 export class ExecutionConnector {
   private readonly config: ExecutionConnectorConfig;
   private readonly listeners = new Set<ExecutionListener>();
+  private readonly statusListeners = new Set<StatusListener>();
   private readonly symbols = new Set<string>();
   private readonly quotes = new Map<string, TestnetQuote>();
 
@@ -33,8 +46,17 @@ export class ExecutionConnector {
   private reconnectingUserStream = false;
   private lastSequenceEventMs = 0;
 
+  private apiKey: string | undefined;
+  private apiSecret: string | undefined;
+  private executionEnabled: boolean;
+  private state: ExecutionConnectionState = 'DISCONNECTED';
+  private lastError: string | null = null;
+
   constructor(config: ExecutionConnectorConfig) {
     this.config = config;
+    this.apiKey = config.apiKey;
+    this.apiSecret = config.apiSecret;
+    this.executionEnabled = config.enabled;
   }
 
   onExecutionEvent(listener: ExecutionListener) {
@@ -42,24 +64,101 @@ export class ExecutionConnector {
     return () => this.listeners.delete(listener);
   }
 
+  onStatus(listener: StatusListener) {
+    this.statusListeners.add(listener);
+    listener(this.getStatus());
+    return () => this.statusListeners.delete(listener);
+  }
+
+  getStatus(): ExecutionConnectorStatus {
+    return {
+      state: this.state,
+      executionEnabled: this.executionEnabled,
+      hasCredentials: Boolean(this.apiKey && this.apiSecret),
+      symbols: Array.from(this.symbols),
+      lastError: this.lastError,
+      updatedAtMs: Date.now(),
+    };
+  }
+
+  isExecutionEnabled(): boolean {
+    return this.executionEnabled;
+  }
+
+  setExecutionEnabled(enabled: boolean) {
+    this.executionEnabled = Boolean(enabled);
+    this.emitStatus();
+  }
+
+  setCredentials(apiKey: string, apiSecret: string) {
+    this.apiKey = apiKey;
+    this.apiSecret = apiSecret;
+    this.lastError = null;
+    this.emitStatus();
+  }
+
+  clearCredentials() {
+    this.apiKey = undefined;
+    this.apiSecret = undefined;
+    this.emitStatus();
+  }
+
   ensureSymbol(symbol: string) {
     const normalized = symbol.toUpperCase();
     if (!this.symbols.has(normalized)) {
       this.symbols.add(normalized);
       this.reconnectMarketData();
+      this.emitStatus();
     }
+  }
+
+  setSymbols(symbols: string[]) {
+    this.symbols.clear();
+    for (const symbol of symbols) {
+      this.symbols.add(symbol.toUpperCase());
+    }
+    this.reconnectMarketData();
+    this.emitStatus();
   }
 
   getQuote(symbol: string): TestnetQuote | null {
     return this.quotes.get(symbol.toUpperCase()) || null;
   }
 
-  async start() {
-    if (!this.config.enabled) {
+  async connect(): Promise<void> {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('Missing testnet API credentials');
+    }
+
+    if (this.state === 'CONNECTED' || this.state === 'CONNECTING') {
       return;
     }
-    await this.startUserStream();
-    this.reconnectMarketData();
+
+    this.state = 'CONNECTING';
+    this.lastError = null;
+    this.emitStatus();
+
+    try {
+      await this.startUserStream();
+      this.reconnectMarketData();
+      await this.syncState();
+      this.state = 'CONNECTED';
+      this.lastError = null;
+      this.emitStatus();
+    } catch (error: any) {
+      this.state = 'ERROR';
+      this.lastError = error?.message || 'connect_failed';
+      this.emitStatus();
+      throw error;
+    }
+  }
+
+  async start() {
+    if (this.apiKey && this.apiSecret) {
+      await this.connect();
+    } else {
+      this.emitStatus();
+    }
   }
 
   async stop() {
@@ -83,6 +182,14 @@ export class ExecutionConnector {
       }
       this.listenKey = null;
     }
+
+    this.state = 'DISCONNECTED';
+    this.lastError = null;
+    this.emitStatus();
+  }
+
+  async disconnect(): Promise<void> {
+    await this.stop();
   }
 
   expectedPrice(symbol: string, side: 'BUY' | 'SELL', orderType: 'MARKET' | 'LIMIT', limitPrice?: number): number | null {
@@ -97,7 +204,7 @@ export class ExecutionConnector {
   }
 
   async placeOrder(request: PlaceOrderRequest): Promise<{ orderId: string }> {
-    if (!this.config.enabled) {
+    if (!this.executionEnabled) {
       return { orderId: `dry-${request.clientOrderId}` };
     }
 
@@ -124,7 +231,7 @@ export class ExecutionConnector {
   }
 
   async cancelOrder(request: CancelOrderRequest): Promise<void> {
-    if (!this.config.enabled) {
+    if (!this.apiKey || !this.apiSecret) {
       return;
     }
 
@@ -145,7 +252,7 @@ export class ExecutionConnector {
   }
 
   async cancelAllOpenOrders(symbol: string): Promise<void> {
-    if (!this.config.enabled) {
+    if (!this.apiKey || !this.apiSecret) {
       return;
     }
     await this.signedRequest('/fapi/v1/allOpenOrders', 'DELETE', {
@@ -156,7 +263,7 @@ export class ExecutionConnector {
   }
 
   async syncState(): Promise<void> {
-    if (!this.config.enabled || this.symbols.size === 0) {
+    if (!this.apiKey || !this.apiSecret || this.symbols.size === 0) {
       return;
     }
 
@@ -228,6 +335,19 @@ export class ExecutionConnector {
     }
   }
 
+  async fetchTestnetFuturesPairs(): Promise<string[]> {
+    const response = await fetch(`${this.config.restBaseUrl}/fapi/v1/exchangeInfo`);
+    if (!response.ok) {
+      throw new Error(`testnet exchangeInfo failed: ${response.status}`);
+    }
+    const body: any = await response.json();
+    const symbols = Array.isArray(body.symbols) ? body.symbols : [];
+    return symbols
+      .filter((s: any) => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT')
+      .map((s: any) => String(s.symbol))
+      .sort();
+  }
+
   private async startUserStream() {
     this.listenKey = await this.createListenKey();
     this.connectUserWs(this.listenKey);
@@ -245,6 +365,12 @@ export class ExecutionConnector {
   private connectUserWs(listenKey: string) {
     const url = `${this.config.userDataWsBaseUrl.replace(/\/$/, '')}/ws/${listenKey}`;
     this.userWs = new WebSocket(url);
+
+    this.userWs.on('open', () => {
+      this.state = 'CONNECTED';
+      this.lastError = null;
+      this.emitStatus();
+    });
 
     this.userWs.on('message', (raw) => {
       try {
@@ -270,12 +396,20 @@ export class ExecutionConnector {
     }
     this.reconnectingUserStream = true;
 
+    this.state = 'ERROR';
+    this.lastError = reason;
+    this.emitStatus();
+
     const haltTime = Date.now();
     for (const symbol of this.symbols) {
       this.emitEvent({ type: 'SYSTEM_HALT', symbol, event_time_ms: haltTime, reason });
     }
 
     try {
+      if (!this.apiKey || !this.apiSecret) {
+        return;
+      }
+
       if (this.listenKey) {
         try {
           await this.deleteListenKey(this.listenKey);
@@ -376,7 +510,11 @@ export class ExecutionConnector {
   }
 
   private reconnectMarketData() {
-    if (!this.config.enabled || this.symbols.size === 0) {
+    if (this.symbols.size === 0 || !this.apiKey || !this.apiSecret) {
+      if (this.marketWs) {
+        this.marketWs.close();
+        this.marketWs = null;
+      }
       return;
     }
 
@@ -424,7 +562,7 @@ export class ExecutionConnector {
   }
 
   async refreshQuotesByRest() {
-    if (!this.config.enabled) {
+    if (!this.apiKey || !this.apiSecret) {
       return;
     }
     for (const symbol of this.symbols) {
@@ -450,7 +588,7 @@ export class ExecutionConnector {
     const response = await fetch(`${this.config.restBaseUrl}/fapi/v1/listenKey`, {
       method: 'POST',
       headers: {
-        'X-MBX-APIKEY': this.config.apiKey || '',
+        'X-MBX-APIKEY': this.apiKey || '',
       },
     });
     if (!response.ok) {
@@ -467,7 +605,7 @@ export class ExecutionConnector {
     await fetch(`${this.config.restBaseUrl}/fapi/v1/listenKey`, {
       method: 'PUT',
       headers: {
-        'X-MBX-APIKEY': this.config.apiKey || '',
+        'X-MBX-APIKEY': this.apiKey || '',
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: `listenKey=${encodeURIComponent(listenKey)}`,
@@ -478,7 +616,7 @@ export class ExecutionConnector {
     await fetch(`${this.config.restBaseUrl}/fapi/v1/listenKey`, {
       method: 'DELETE',
       headers: {
-        'X-MBX-APIKEY': this.config.apiKey || '',
+        'X-MBX-APIKEY': this.apiKey || '',
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: `listenKey=${encodeURIComponent(listenKey)}`,
@@ -486,18 +624,24 @@ export class ExecutionConnector {
   }
 
   private emitEvent(event: ExecutionEvent) {
-    // Keep order stable for consumers relying on event-time ordering.
     this.lastSequenceEventMs = Math.max(this.lastSequenceEventMs, event.event_time_ms);
     for (const listener of this.listeners) {
       listener(event);
     }
   }
 
+  private emitStatus() {
+    const status = this.getStatus();
+    for (const listener of this.statusListeners) {
+      listener(status);
+    }
+  }
+
   private async signedRequest(path: string, method: 'GET' | 'POST' | 'DELETE', params: Record<string, string | number | boolean>): Promise<any> {
-    const apiKey = this.config.apiKey;
-    const secret = this.config.apiSecret;
+    const apiKey = this.apiKey;
+    const secret = this.apiSecret;
     if (!apiKey || !secret) {
-      throw new Error('Execution connector enabled but missing API keys');
+      throw new Error('Execution connector is missing API keys');
     }
 
     const query = new URLSearchParams();

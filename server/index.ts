@@ -567,6 +567,8 @@ function broadcastMetrics(
 
     if (eventTimeMs > 0) {
         const canonicalTimeMs = Date.now();
+        // Mainnet market data is ingested here only for signal/intent generation.
+        // Execution state remains testnet-only via execution events in orchestrator.
         orchestrator.ingest({
             symbol: s,
             canonical_time_ms: canonicalTimeMs,
@@ -590,6 +592,7 @@ function broadcastMetrics(
 // =============================================================================
 
 const app = express();
+app.use(express.json());
 
 // CORS configuration - more permissive for development, restrictive for production
 const corsOptions = {
@@ -670,6 +673,72 @@ app.get('/api/exchange-info', async (req, res) => {
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
     res.json(await fetchExchangeInfo());
+});
+
+app.get('/api/testnet/exchange-info', async (req, res) => {
+    try {
+        const symbols = await orchestrator.listTestnetFuturesPairs();
+        res.json({ symbols });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message || 'testnet_exchange_info_failed' });
+    }
+});
+
+app.get('/api/execution/status', (req, res) => {
+    res.json(orchestrator.getExecutionStatus());
+});
+
+app.post('/api/execution/connect', async (req, res) => {
+    try {
+        const apiKey = String(req.body?.apiKey || '');
+        const apiSecret = String(req.body?.apiSecret || '');
+        if (!apiKey || !apiSecret) {
+            res.status(400).json({ error: 'apiKey and apiSecret are required' });
+            return;
+        }
+        await orchestrator.connectExecution(apiKey, apiSecret);
+        res.json({ ok: true, status: orchestrator.getExecutionStatus() });
+    } catch (e: any) {
+        res.status(500).json({ ok: false, error: e.message || 'execution_connect_failed' });
+    }
+});
+
+app.post('/api/execution/disconnect', async (req, res) => {
+    try {
+        await orchestrator.disconnectExecution();
+        res.json({ ok: true, status: orchestrator.getExecutionStatus() });
+    } catch (e: any) {
+        res.status(500).json({ ok: false, error: e.message || 'execution_disconnect_failed' });
+    }
+});
+
+app.post('/api/execution/enabled', async (req, res) => {
+    const enabled = Boolean(req.body?.enabled);
+    await orchestrator.setExecutionEnabled(enabled);
+    res.json({ ok: true, status: orchestrator.getExecutionStatus() });
+});
+
+app.post('/api/execution/symbol', async (req, res) => {
+    try {
+        const symbol = String(req.body?.symbol || '').toUpperCase();
+        if (!symbol) {
+            res.status(400).json({ error: 'symbol is required' });
+            return;
+        }
+        await orchestrator.setExecutionSymbol(symbol);
+        res.json({ ok: true, status: orchestrator.getExecutionStatus() });
+    } catch (e: any) {
+        res.status(500).json({ ok: false, error: e.message || 'execution_symbol_set_failed' });
+    }
+});
+
+app.post('/api/execution/settings', (req, res) => {
+    const settings = orchestrator.updateCapitalSettings({
+        initialBalanceUsdt: Number(req.body?.initialBalanceUsdt),
+        walletUsagePercent: Number(req.body?.walletUsagePercent),
+        leverage: Number(req.body?.leverage),
+    });
+    res.json({ ok: true, settings, status: orchestrator.getExecutionStatus() });
 });
 
 const server = createServer(app);

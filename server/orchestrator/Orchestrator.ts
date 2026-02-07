@@ -22,6 +22,13 @@ export class Orchestrator {
   private readonly logger: OrchestratorLogger;
   private readonly expectedByOrderId = new Map<string, { expectedPrice: number | null; sentAtMs: number; tag: 'entry' | 'add' | 'exit' }>();
   private readonly decisionLedger: DecisionRecord[] = [];
+  private executionSymbol: string | null = null;
+  private capitalSettings = {
+    initialBalanceUsdt: 1000,
+    walletUsagePercent: 10,
+    leverage: 10,
+  };
+  private readonly realizedPnlBySymbol = new Map<string, number>();
 
   constructor(
     private readonly connector: ExecutionConnector,
@@ -50,6 +57,10 @@ export class Orchestrator {
     });
 
     this.connector.onExecutionEvent((event) => {
+      if (event.type === 'TRADE_UPDATE') {
+        const prev = this.realizedPnlBySymbol.get(event.symbol) || 0;
+        this.realizedPnlBySymbol.set(event.symbol, prev + event.realizedPnl);
+      }
       this.ingestExecutionReplay(event);
     });
   }
@@ -60,6 +71,9 @@ export class Orchestrator {
 
   ingest(metrics: OrchestratorMetricsInput) {
     const symbol = metrics.symbol.toUpperCase();
+    if (this.executionSymbol && symbol !== this.executionSymbol) {
+      return;
+    }
     this.connector.ensureSymbol(symbol);
 
     const canonical_time_ms = metrics.canonical_time_ms ?? Date.now();
@@ -88,6 +102,9 @@ export class Orchestrator {
     gate: MetricsEventEnvelope['gate'];
   }) {
     const symbol = logLine.symbol.toUpperCase();
+    if (this.executionSymbol && symbol !== this.executionSymbol) {
+      return;
+    }
     this.connector.ensureSymbol(symbol);
     this.enqueueMetrics(
       symbol,
@@ -131,6 +148,9 @@ export class Orchestrator {
 
   ingestExecutionReplay(execution: ExecutionEvent) {
     const symbol = execution.symbol.toUpperCase();
+    if (this.executionSymbol && symbol !== this.executionSymbol) {
+      return;
+    }
     this.connector.ensureSymbol(symbol);
 
     const envelope: ExecutionEventEnvelope = {
@@ -185,6 +205,83 @@ export class Orchestrator {
     return out;
   }
 
+  getExecutionStatus() {
+    const connectorStatus = this.connector.getStatus();
+    const selectedSymbol = this.executionSymbol;
+    const state = selectedSymbol ? this.actors.get(selectedSymbol)?.state || null : null;
+    const realized = selectedSymbol ? (this.realizedPnlBySymbol.get(selectedSymbol) || 0) : 0;
+    const unrealized = state?.position?.unrealizedPnlPct || 0;
+
+    return {
+      connection: connectorStatus,
+      selectedSymbol,
+      settings: this.capitalSettings,
+      wallet: {
+        totalWalletUsdt: state?.walletBalance || 0,
+        availableBalanceUsdt: state?.availableBalance || 0,
+        realizedPnl: realized,
+        unrealizedPnl: unrealized,
+        totalPnl: realized + unrealized,
+      },
+      openPosition: state?.position
+        ? {
+            side: state.position.side,
+            size: state.position.qty,
+            entryPrice: state.position.entryPrice,
+            leverage: this.capitalSettings.leverage,
+          }
+        : null,
+    };
+  }
+
+  updateCapitalSettings(input: { initialBalanceUsdt?: number; walletUsagePercent?: number; leverage?: number }) {
+    if (typeof input.initialBalanceUsdt === 'number' && Number.isFinite(input.initialBalanceUsdt) && input.initialBalanceUsdt >= 0) {
+      this.capitalSettings.initialBalanceUsdt = input.initialBalanceUsdt;
+    }
+    if (typeof input.walletUsagePercent === 'number' && Number.isFinite(input.walletUsagePercent) && input.walletUsagePercent >= 0 && input.walletUsagePercent <= 100) {
+      this.capitalSettings.walletUsagePercent = input.walletUsagePercent;
+    }
+    if (typeof input.leverage === 'number' && Number.isFinite(input.leverage) && input.leverage > 0) {
+      this.capitalSettings.leverage = Math.min(input.leverage, this.config.maxLeverage);
+    }
+    return this.capitalSettings;
+  }
+
+  async setExecutionEnabled(enabled: boolean) {
+    this.connector.setExecutionEnabled(enabled);
+  }
+
+  async connectExecution(apiKey: string, apiSecret: string) {
+    this.connector.setCredentials(apiKey, apiSecret);
+    await this.connector.connect();
+  }
+
+  async disconnectExecution() {
+    await this.connector.disconnect();
+  }
+
+  async listTestnetFuturesPairs() {
+    return this.connector.fetchTestnetFuturesPairs();
+  }
+
+  async setExecutionSymbol(symbol: string) {
+    const normalized = symbol.toUpperCase();
+    if (this.executionSymbol === normalized) {
+      return;
+    }
+
+    const previousSymbol = this.executionSymbol;
+    if (previousSymbol) {
+      await this.connector.cancelAllOpenOrders(previousSymbol);
+      this.actors.delete(previousSymbol);
+      this.realizedPnlBySymbol.delete(previousSymbol);
+    }
+
+    this.executionSymbol = normalized;
+    this.connector.setSymbols([normalized]);
+    await this.connector.syncState();
+  }
+
   private getActor(symbol: string): SymbolActor {
     let actor = this.actors.get(symbol);
     if (actor) {
@@ -217,6 +314,9 @@ export class Orchestrator {
         this.logger.logDecision(canonical_time_ms, record);
       },
       onExecutionLogged: (event, state) => {
+        if (!this.connector.isExecutionEnabled()) {
+          return;
+        }
         this.logger.logExecution(event.event_time_ms, {
           event_time_ms: event.event_time_ms,
           symbol: event.symbol,
@@ -251,6 +351,10 @@ export class Orchestrator {
     const actor = this.getActor(symbol);
     for (const action of actions) {
       if (action.type === 'NOOP') {
+        continue;
+      }
+
+      if (!this.connector.isExecutionEnabled()) {
         continue;
       }
 
@@ -312,12 +416,13 @@ export class Orchestrator {
 }
 
 export function createOrchestratorFromEnv(): Orchestrator {
+  const executionEnabledEnv = String(process.env.EXECUTION_ENABLED || 'false').toLowerCase();
   const gateMode = process.env.ENABLE_GATE_V2 === 'true'
     ? GateMode.V2_NETWORK_LATENCY
     : GateMode.V1_NO_LATENCY;
 
   const connector = new ExecutionConnector({
-    enabled: process.env.EXECUTION_ENABLED === '1',
+    enabled: executionEnabledEnv === 'true' || executionEnabledEnv === '1',
     apiKey: process.env.BINANCE_TESTNET_API_KEY,
     apiSecret: process.env.BINANCE_TESTNET_API_SECRET,
     restBaseUrl: process.env.BINANCE_TESTNET_REST_BASE || 'https://testnet.binancefuture.com',
@@ -336,7 +441,7 @@ export function createOrchestratorFromEnv(): Orchestrator {
       },
     },
     riskPerTradePercent: Number(process.env.RISK_PER_TRADE_PERCENT || 0.5),
-    maxLeverage: Number(process.env.MAX_LEVERAGE || 25),
+    maxLeverage: Number(process.env.MAX_LEVERAGE || 100),
     cooldownMinMs: Number(process.env.COOLDOWN_MIN_MS || 2000),
     cooldownMaxMs: Number(process.env.COOLDOWN_MAX_MS || 30000),
     loggerQueueLimit: Number(process.env.LOGGER_QUEUE_LIMIT || 5000),
