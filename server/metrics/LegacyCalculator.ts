@@ -77,46 +77,57 @@ export class LegacyCalculator {
      * the original UI.  Undefined values are returned as null.
      */
     computeMetrics(ob: OrderbookState) {
-        // Calculate weighted orderbook imbalance using top 10 levels
-        const calcObi = (levels: Map<number, number>, depth: number): number => {
-            // Convert map to sorted array (desc for bids, asc for asks)
+        // Helper to calculate raw volume for a given depth (descending for bids, ascending for asks)
+        const calcVolume = (levels: Map<number, number>, depth: number, isAsk: boolean): number => {
             const entries = Array.from(levels.entries());
-            entries.sort((a, b) => b[0] - a[0]);
-            let volBid = 0;
+            // Sort: Bids Descending, Asks Ascending
+            entries.sort((a, b) => isAsk ? a[0] - b[0] : b[0] - a[0]);
+            let vol = 0;
             for (let i = 0; i < Math.min(depth, entries.length); i++) {
-                volBid += entries[i][1];
+                vol += entries[i][1];
             }
-            return volBid;
+            return vol;
         };
-        // Weighted OBI: difference of top 10 bid and ask volumes
-        const bidVol10 = calcObi(ob.bids, 10);
-        // For asks we need ascending sort
-        const askEntries = Array.from(ob.asks.entries());
-        askEntries.sort((a, b) => a[0] - b[0]);
-        let askVol10 = 0;
-        for (let i = 0; i < Math.min(10, askEntries.length); i++) {
-            askVol10 += askEntries[i][1];
-        }
-        const obiWeighted = bidVol10 - askVol10;
-        // Deep OBI: top 50 levels difference
-        const bidVol50 = calcObi(ob.bids, 50);
-        let askVol50 = 0;
-        for (let i = 0; i < Math.min(50, askEntries.length); i++) {
-            askVol50 += askEntries[i][1];
-        }
-        const obiDeep = bidVol50 - askVol50;
+
+        const epsilon = 1e-9;
+
+        // --- A) OBI Weighted (Normalized) ---
+        // Top 10 levels
+        const bidVol10 = calcVolume(ob.bids, 10, false);
+        const askVol10 = calcVolume(ob.asks, 10, true);
+
+        const rawObiWeighted = bidVol10 - askVol10;
+        const denomWeighted = bidVol10 + askVol10;
+        // Range: [-1, +1]
+        const obiWeighted = rawObiWeighted / Math.max(denomWeighted, epsilon);
+
+        // --- B) OBI Deep Book (Normalized) ---
+        // Top 50 levels (representing deep liquidty)
+        const bidVol50 = calcVolume(ob.bids, 50, false);
+        const askVol50 = calcVolume(ob.asks, 50, true);
+
+        const rawObiDeep = bidVol50 - askVol50;
+        const denomDeep = bidVol50 + askVol50;
+        // Range: [-1, +1]
+        const obiDeep = rawObiDeep / Math.max(denomDeep, epsilon);
+
+        // --- C) OBI Divergence (Stable Definition) ---
+        // Difference between weighted (near) and deep OBI
+        // Range: [-2, +2]
         const obiDivergence = obiWeighted - obiDeep;
-        // Recompute rolling delta windows based on current time.  Using
-        // current timestamp ensures the 1s/5s windows reflect the last
-        // second and last five seconds rather than the last trade time.
-        const now = Date.now();
+        // Recompute rolling delta windows.
+        // Use last trade timestamp as reference to avoid clock skew between 
+        // Binance server time and local time.
+        const refTime = this.trades.length > 0
+            ? this.trades[this.trades.length - 1].timestamp
+            : Date.now();
         let delta1s = 0;
         let delta5s = 0;
         for (const t of this.trades) {
-            if (t.timestamp >= now - 1_000) {
+            if (t.timestamp >= refTime - 1_000) {
                 delta1s += t.side === 'buy' ? t.quantity : -t.quantity;
             }
-            if (t.timestamp >= now - 5_000) {
+            if (t.timestamp >= refTime - 5_000) {
                 delta5s += t.side === 'buy' ? t.quantity : -t.quantity;
             }
         }
@@ -151,6 +162,84 @@ export class LegacyCalculator {
         const bestBidPrice = bestBid(ob) ?? 0;
         const bestAskPrice = bestAsk(ob) ?? 0;
         const midPrice = (bestBidPrice + bestAskPrice) / 2;
+
+        // ===== ADVANCED METRICS CALCULATIONS =====
+
+        // --- Sweep/Fade Score ---
+        // Measures aggressive buying vs selling momentum
+        // Positive = aggressive buyers sweeping asks, Negative = aggressive sellers hitting bids
+        let sweepFadeScore = 0;
+        if (this.trades.length >= 2) {
+            const recentTrades = this.trades.slice(-20); // Last 20 trades
+            let buyVol = 0, sellVol = 0;
+            for (const t of recentTrades) {
+                if (t.side === 'buy') buyVol += t.quantity;
+                else sellVol += t.quantity;
+            }
+            const total = buyVol + sellVol;
+            if (total > 0) {
+                sweepFadeScore = (buyVol - sellVol) / total; // Range: [-1, +1]
+            }
+        }
+
+        // --- Breakout Score (Momentum) ---
+        // Measures price momentum based on recent price movement direction
+        // Uses the slope of recent trade prices
+        let breakoutScore = 0;
+        if (this.trades.length >= 5) {
+            const recentPrices = this.trades.slice(-10).map(t => t.price);
+            if (recentPrices.length >= 2) {
+                const firstHalf = recentPrices.slice(0, Math.floor(recentPrices.length / 2));
+                const secondHalf = recentPrices.slice(Math.floor(recentPrices.length / 2));
+                const avgFirst = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
+                const avgSecond = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
+                // Normalize by typical price movement (use spread as reference)
+                const spread = bestAskPrice - bestBidPrice;
+                if (spread > 0) {
+                    breakoutScore = Math.max(-1, Math.min(1, (avgSecond - avgFirst) / (spread * 5)));
+                }
+            }
+        }
+
+        // --- Regime Weight (Volatility) ---
+        // Measures market volatility based on price range in recent trades
+        let regimeWeight = 0;
+        if (this.trades.length >= 5) {
+            const recentPrices = this.trades.slice(-20).map(t => t.price);
+            const minPrice = Math.min(...recentPrices);
+            const maxPrice = Math.max(...recentPrices);
+            const range = maxPrice - minPrice;
+            const avgPrice = recentPrices.reduce((a, b) => a + b, 0) / recentPrices.length;
+            // Normalize range relative to price (as percentage)
+            if (avgPrice > 0) {
+                const rangePct = (range / avgPrice) * 100;
+                // Scale: 0-0.1% = low vol, 0.1-0.5% = normal, >0.5% = high vol
+                regimeWeight = Math.min(1, rangePct * 2); // Cap at 1
+            }
+        }
+
+        // --- Absorption Score ---
+        // Detects absorption: large volume with small price movement
+        // Calculated from trade data: high volume + low price change = absorption
+        let absorptionScore = 0;
+        if (this.trades.length >= 5) {
+            const window = this.trades.slice(-30);
+            const totalVol = window.reduce((sum, t) => sum + t.quantity, 0);
+            const prices = window.map(t => t.price);
+            const priceChange = Math.abs(prices[prices.length - 1] - prices[0]);
+            const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+
+            if (avgPrice > 0 && totalVol > 0) {
+                // High volume with low price change = absorption
+                const priceChangePct = (priceChange / avgPrice) * 100;
+                const volumeNorm = Math.min(totalVol / 10, 1); // Normalize volume
+                // Low price change + high volume = high absorption
+                if (priceChangePct < 0.05 && volumeNorm > 0.2) {
+                    absorptionScore = volumeNorm * (1 - priceChangePct * 20);
+                }
+            }
+        }
+
         return {
             price: midPrice,
             obiWeighted,
@@ -164,15 +253,10 @@ export class LegacyCalculator {
             vwap,
             totalVolume: this.totalVolume,
             totalNotional: this.totalNotional,
-            // Advanced legacy metrics currently not computed on the server.
-            // These fields mirror the original client metrics and are set to 0 by
-            // default. They can be implemented later by porting the client
-            // logic from useBinanceSocket.ts.  Keeping them present avoids
-            // breaking the UI which expects these properties.
-            absorptionScore: 0,
-            sweepFadeScore: 0,
-            breakoutScore: 0,
-            regimeWeight: 0,
+            absorptionScore,
+            sweepFadeScore,
+            breakoutScore,
+            regimeWeight,
             tradeCount: this.trades.length
         };
     }

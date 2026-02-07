@@ -40,16 +40,21 @@ import { LegacyCalculator } from './metrics/LegacyCalculator';
 // =============================================================================
 
 const PORT = parseInt(process.env.PORT || '8787', 10);
+const HOST = process.env.HOST || '0.0.0.0'; // Listen on all interfaces for Nginx proxy
 const BINANCE_REST_BASE = 'https://fapi.binance.com';
 const BINANCE_WS_BASE = 'wss://fstream.binance.com/stream';
 
+// Dynamic CORS - allow configured origins plus common development ports
 const ALLOWED_ORIGINS = [
+    // Development
     'http://localhost:5173',
     'http://localhost:5174',
     'http://localhost:5175',
     'http://127.0.0.1:5173',
     'http://127.0.0.1:5174',
     'http://127.0.0.1:5175',
+    // Production - add your domain here or use env var
+    ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : []),
 ];
 
 // Rate Limiting
@@ -81,9 +86,20 @@ interface SymbolMeta {
     isResyncing: boolean;
     // Counters
     depthMsgCount: number;
+    depthMsgCount10s: number;
+    lastDepthMsgTs: number;
     tradeMsgCount: number;
     desyncCount: number;
     snapshotCount: number;
+    lastSnapshotHttpStatus: number;
+    snapshotLastUpdateId: number;
+    // Broadcast tracking
+    lastBroadcastTs: number;
+    metricsBroadcastCount10s: number;
+    metricsBroadcastDepthCount10s: number;
+    metricsBroadcastTradeCount10s: number;
+    lastMetricsBroadcastReason: 'depth' | 'trade' | 'none';
+    applyCount10s: number;
 }
 
 const symbolMeta = new Map<string, SymbolMeta>();
@@ -123,9 +139,20 @@ function getMeta(symbol: string): SymbolMeta {
             consecutiveErrors: 0,
             isResyncing: false,
             depthMsgCount: 0,
+            depthMsgCount10s: 0,
+            lastDepthMsgTs: 0,
             tradeMsgCount: 0,
             desyncCount: 0,
-            snapshotCount: 0
+            snapshotCount: 0,
+            lastSnapshotHttpStatus: 0,
+            snapshotLastUpdateId: 0,
+            // Broadcast tracking
+            lastBroadcastTs: 0,
+            metricsBroadcastCount10s: 0,
+            metricsBroadcastDepthCount10s: 0,
+            metricsBroadcastTradeCount10s: 0,
+            lastMetricsBroadcastReason: 'none',
+            applyCount10s: 0
         };
         symbolMeta.set(symbol, meta);
     }
@@ -220,11 +247,14 @@ async function fetchSnapshot(symbol: string) {
         log('SNAPSHOT_REQ', { symbol });
         const res = await fetch(`${BINANCE_REST_BASE}/fapi/v1/depth?symbol=${symbol}&limit=1000`);
 
+        meta.lastSnapshotHttpStatus = res.status;
+
         if (res.status === 429 || res.status === 418) {
             const retryAfter = parseInt(res.headers.get('Retry-After') || '60', 10) * 1000;
+            const weight = res.headers.get('x-mbx-used-weight-1m');
             globalBackoffUntil = Date.now() + retryAfter;
             meta.backoffMs = Math.min(meta.backoffMs * 2, MAX_BACKOFF_MS);
-            log('SNAPSHOT_429', { symbol, retryAfter, backoff: meta.backoffMs });
+            log('SNAPSHOT_429', { symbol, retryAfter, backoff: meta.backoffMs, weight });
             ob.uiState = 'STALE';
             return;
         }
@@ -242,10 +272,21 @@ async function fetchSnapshot(symbol: string) {
         // Success
         applySnapshot(ob, data);
         meta.lastSnapshotOk = now;
+        meta.snapshotLastUpdateId = data.lastUpdateId;
         meta.backoffMs = MIN_BACKOFF_MS;
         meta.consecutiveErrors = 0;
         meta.isResyncing = false;
         meta.snapshotCount++;
+
+        // Debug: SNAPSHOT_TOP event
+        log('SNAPSHOT_TOP', {
+            symbol,
+            snapshotLastUpdateId: data.lastUpdateId,
+            bestBid: bestBid(ob),
+            bestAsk: bestAsk(ob),
+            bidsCount: ob.bids.size,
+            asksCount: ob.asks.size
+        });
 
         log('SNAPSHOT_OK', { symbol, lastUpdateId: data.lastUpdateId });
 
@@ -328,7 +369,10 @@ function handleMsg(raw: Buffer) {
     if (e === 'depthUpdate') {
         const meta = getMeta(s);
         meta.depthMsgCount++;
+        meta.depthMsgCount10s++;
+        meta.lastDepthMsgTs = Date.now();
         const ob = getOrderbook(s);
+        ob.lastSeenU_u = `${d.U}-${d.u}`;
 
         // Ensure Monitors are running
         ensureMonitors(s);
@@ -340,15 +384,50 @@ function handleMsg(raw: Buffer) {
         if (!success) {
             // Desync detected by OrderbookManager
             meta.desyncCount++;
-            log('DEPTH_DESYNC', { symbol: s, u: d.u, U: d.U });
+            log('DEPTH_DESYNC', { symbol: s, u: d.u, U: d.U, lastUpdateId: ob.lastUpdateId });
             // Only trigger snapshot if not already trying
             if (!meta.isResyncing) fetchSnapshot(s);
         } else {
-            // Ideally we check if we were UNSEEDED and now need snapshot?
-            // OrderbookManager handles buffering if UNSEEDED.
-            // But we must eventually trigger a seed!
-            if (ob.uiState === 'UNSEEDED' && !meta.isResyncing) {
-                fetchSnapshot(s);
+            // Check if we are stuck buffering without seed
+            if (ob.uiState === 'UNSEEDED') {
+                // We are buffering. Log periodically?
+                // logic handled by applyDepthUpdate stats.
+                if (meta.depthMsgCount % 100 === 0) {
+                    log('DEPTH_BUFFERING_NO_SEED', { symbol: s, bufferSize: ob.buffer.length });
+                }
+
+                if (!meta.isResyncing) {
+                    fetchSnapshot(s);
+                }
+            } else {
+                // Track applies
+                meta.applyCount10s++;
+
+                // Broadcast metrics on depth updates (throttled internally by broadcastMetrics)
+                const tas = getTaS(s);
+                const cvd = getCvd(s);
+                const abs = getAbs(s);
+                const leg = getLegacy(s);
+                const absVal = absorptionResult.get(s) ?? 0;
+                broadcastMetrics(s, ob, tas, cvd, absVal, leg, 'depth');
+
+                // Debug: BOOK_TOP event (every 200th apply to avoid spam)
+                if (ob.stats.applied % 200 === 0) {
+                    log('BOOK_TOP', {
+                        symbol: s,
+                        bestBid: bestBid(ob),
+                        bestAsk: bestAsk(ob),
+                        bidsCount: ob.bids.size,
+                        asksCount: ob.asks.size,
+                        lastAppliedUpdateId: ob.lastUpdateId
+                    });
+                }
+
+                if (ob.stats.applied % 100 === 0) {
+                    // Log book levels occasionally
+                    const { bids, asks } = getTopLevels(ob, 1);
+                    log('BOOK_LEVELS', { symbol: s, bestBid: bids[0]?.[0], bestAsk: asks[0]?.[0] });
+                }
             }
         }
     } else if (e === 'trade') {
@@ -385,11 +464,25 @@ function broadcastMetrics(
     tas: TimeAndSales,
     cvd: CvdCalculator,
     absVal: number,
-    leg: LegacyCalculator
+    leg: LegacyCalculator,
+    reason: 'depth' | 'trade' = 'trade'
 ) {
+    const THROTTLE_MS = 250; // 4Hz max per symbol
+    const meta = getMeta(s);
+    const now = Date.now();
+
+    // Throttle check - skip if last broadcast was too recent
+    const intervalMs = now - meta.lastBroadcastTs;
+    if (intervalMs < THROTTLE_MS) {
+        // Throttled - skip but log occasionally
+        return;
+    }
+
     const cvdM = cvd.computeMetrics();
-    // Only calculate OBI/Legacy if Orderbook is usable
-    const legacyM = (ob.uiState === 'LIVE' || ob.uiState === 'STALE') ? leg.computeMetrics(ob) : null;
+    // Calculate OBI/Legacy if Orderbook has data (bids and asks exist)
+    // This allows metrics to continue displaying during brief resyncs
+    const hasBookData = ob.bids.size > 0 && ob.asks.size > 0;
+    const legacyM = hasBookData ? leg.computeMetrics(ob) : null;
 
     // Top of book
     const { bids, asks } = getTopLevels(ob, 20);
@@ -404,6 +497,7 @@ function broadcastMetrics(
             tf1m: cvdM.find(x => x.timeframe === '1m') || { cvd: 0, delta: 0 },
             tf5m: cvdM.find(x => x.timeframe === '5m') || { cvd: 0, delta: 0 },
             tf15m: cvdM.find(x => x.timeframe === '15m') || { cvd: 0, delta: 0 },
+            tradeCounts: cvd.getTradeCounts() // Debug: trade counts per timeframe
         },
         absorption: absVal,
         openInterest: lastOpenInterest.get(s) || null,
@@ -414,9 +508,47 @@ function broadcastMetrics(
     };
 
     const str = JSON.stringify(payload);
+    let sentCount = 0;
     clients.forEach(c => {
-        if (c.readyState === WebSocket.OPEN && clientSubs.get(c)?.has(s)) c.send(str);
+        if (c.readyState === WebSocket.OPEN && clientSubs.get(c)?.has(s)) {
+            c.send(str);
+            sentCount++;
+        }
     });
+
+    // Update counters
+    meta.lastBroadcastTs = now;
+    meta.metricsBroadcastCount10s++;
+    meta.lastMetricsBroadcastReason = reason;
+    if (reason === 'depth') {
+        meta.metricsBroadcastDepthCount10s++;
+    } else {
+        meta.metricsBroadcastTradeCount10s++;
+    }
+
+    // Log broadcast event (every 20th to avoid spam)
+    if (meta.metricsBroadcastCount10s % 20 === 1) {
+        log(reason === 'depth' ? 'METRICS_BROADCAST_DEPTH' : 'METRICS_BROADCAST_TRADE', {
+            symbol: s,
+            reason,
+            throttled: false,
+            intervalMs,
+            sentTo: sentCount,
+            obiWeighted: legacyM?.obiWeighted ?? null,
+            obiDeep: legacyM?.obiDeep ?? null,
+            obiDivergence: legacyM?.obiDivergence ?? null
+        });
+
+        // Debug: METRICS_SYMBOL_BIND for integrity check
+        log('METRICS_SYMBOL_BIND', {
+            symbol: s,
+            bestBid: bestBid(ob),
+            bestAsk: bestAsk(ob),
+            obiWeighted: legacyM?.obiWeighted ?? null,
+            obiDeep: legacyM?.obiDeep ?? null,
+            bookLevels: { bids: ob.bids.size, asks: ob.asks.size }
+        });
+    }
 }
 
 
@@ -425,7 +557,33 @@ function broadcastMetrics(
 // =============================================================================
 
 const app = express();
-app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
+
+// CORS configuration - more permissive for development, restrictive for production
+const corsOptions = {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        // Allow requests with no origin (mobile apps, curl, etc.)
+        if (!origin) {
+            callback(null, true);
+            return;
+        }
+        // Check against allowed origins
+        if (ALLOWED_ORIGINS.includes(origin)) {
+            callback(null, true);
+            return;
+        }
+        // In development, allow any origin
+        if (process.env.NODE_ENV !== 'production') {
+            callback(null, true);
+            return;
+        }
+        // Reject in production if not in list
+        callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+};
+app.use(cors(corsOptions));
 
 app.get('/api/health', (req, res) => {
     const now = Date.now();
@@ -443,10 +601,29 @@ app.get('/api/health', (req, res) => {
         result.symbols[s] = {
             status: ob.uiState,
             lastSnapshot: meta.lastSnapshotOk ? Math.floor((now - meta.lastSnapshotOk) / 1000) + 's ago' : 'never',
-            buffer: ob.stats.buffered,
-            drops: ob.stats.dropped,
-            applied: ob.stats.applied,
-            desyncs: meta.desyncCount,
+            lastSnapshotOkTs: meta.lastSnapshotOk,
+            snapshotLastUpdateId: meta.snapshotLastUpdateId,
+            lastSnapshotHttpStatus: meta.lastSnapshotHttpStatus,
+            depthMsgCount10s: meta.depthMsgCount10s,
+            lastDepthMsgTs: meta.lastDepthMsgTs,
+            bufferedDepthCount: ob.stats.buffered,
+            applyCount: ob.stats.applied,
+            applyCount10s: meta.applyCount10s,
+            dropCount: ob.stats.dropped,
+            desyncCount: meta.desyncCount,
+            lastSeenU_u: ob.lastSeenU_u,
+            bookLevels: {
+                bids: ob.bids.size,
+                asks: ob.asks.size,
+                bestBid: bestBid(ob),
+                bestAsk: bestAsk(ob)
+            },
+            // Broadcast tracking
+            metricsBroadcastCount10s: meta.metricsBroadcastCount10s,
+            metricsBroadcastDepthCount10s: meta.metricsBroadcastDepthCount10s,
+            metricsBroadcastTradeCount10s: meta.metricsBroadcastTradeCount10s,
+            lastMetricsBroadcastTs: meta.lastBroadcastTs,
+            lastMetricsBroadcastReason: meta.lastMetricsBroadcastReason,
             backoff: meta.backoffMs,
             trades: meta.tradeMsgCount
         };
@@ -455,6 +632,10 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/exchange-info', async (req, res) => {
+    // Disable caching to prevent 304 responses
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
     res.json(await fetchExchangeInfo());
 });
 
@@ -484,4 +665,15 @@ wss.on('connection', (wc, req) => {
     });
 });
 
-server.listen(PORT, '0.0.0.0', () => log('SERVER_UP', { port: PORT }));
+// Reset 10s counters
+setInterval(() => {
+    symbolMeta.forEach(meta => {
+        meta.depthMsgCount10s = 0;
+        meta.metricsBroadcastCount10s = 0;
+        meta.metricsBroadcastDepthCount10s = 0;
+        meta.metricsBroadcastTradeCount10s = 0;
+        meta.applyCount10s = 0;
+    });
+}, 10000);
+
+server.listen(PORT, HOST, () => log('SERVER_UP', { port: PORT, host: HOST }));

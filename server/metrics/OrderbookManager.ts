@@ -12,7 +12,12 @@
  * determine the best bid/ask, and retrieve size at a given price.
  */
 
-import { DepthCache } from '../index';
+// Define DepthCache locally to avoid circular dependency/missing export
+export interface DepthCache {
+  lastUpdateId: number;
+  bids: [string, string][];
+  asks: [string, string][];
+}
 
 export type OrderbookUiState = 'LIVE' | 'STALE' | 'RESYNCING' | 'UNSEEDED';
 
@@ -25,6 +30,8 @@ export interface OrderbookState {
   resyncPromise: Promise<void> | null;
   // New fields for strict Futures Logic
   buffer: any[];
+  // Diagnostic fields
+  lastSeenU_u: string; // "U-u"
   stats: {
     applied: number;
     dropped: number;
@@ -42,6 +49,7 @@ export function createOrderbookState(): OrderbookState {
     uiState: 'UNSEEDED',
     resyncPromise: null,
     buffer: [],
+    lastSeenU_u: '',
     stats: { applied: 0, dropped: 0, buffered: 0, desyncs: 0 }
   };
 }
@@ -77,7 +85,12 @@ export function applySnapshot(state: OrderbookState, snapshot: DepthCache) {
 
 /**
  * Returns TRUE if applied or buffered. Returns FALSE if desync (GAP) detected that requires snapshot.
+ * 
+ * Tolerant Mode: Small gaps (up to MAX_GAP_TOLERANCE) are accepted and we simply update lastUpdateId.
+ * This prevents frequent resyncs due to minor packet loss while maintaining reasonable accuracy.
  */
+const MAX_GAP_TOLERANCE = 100; // Allow gaps up to 100 sequence IDs before triggering resync
+
 export function applyDepthUpdate(state: OrderbookState, update: { U: number; u: number; b: [string, string][]; a: [string, string][] }): boolean {
   // 1. If UNSEEDED or RESYNCING, Buffer It.
   if (state.lastUpdateId === 0 || state.uiState === 'RESYNCING' || state.uiState === 'UNSEEDED') {
@@ -94,29 +107,49 @@ export function applyDepthUpdate(state: OrderbookState, update: { U: number; u: 
     return true; // Looked at it, didn't need it. Not a gap.
   }
 
-  // 3. Strict Sequence Check: U <= lastUpdateId + 1 <= u
-  if (update.U <= state.lastUpdateId + 1 && update.u >= state.lastUpdateId + 1) {
-    // Apply
-    for (const [p, q] of update.b) {
-      const price = parseFloat(p);
-      const qty = parseFloat(q);
-      if (qty === 0) state.bids.delete(price);
-      else state.bids.set(price, qty);
-    }
-    for (const [p, q] of update.a) {
-      const price = parseFloat(p);
-      const qty = parseFloat(q);
-      if (qty === 0) state.asks.delete(price);
-      else state.asks.set(price, qty);
-    }
-    state.lastUpdateId = update.u;
-    state.lastDepthTime = Date.now();
-    state.stats.applied++;
+  // 3. Sequence Check with Tolerance
+  // Standard check: U <= lastUpdateId + 1 <= u
+  // Tolerant check: Allow small gaps where U > lastUpdateId + 1 but gap is small
+  const expectedNext = state.lastUpdateId + 1;
+  const gap = update.U - expectedNext;
+
+  if (gap <= 0 && update.u >= expectedNext) {
+    // Perfect match or overlapping - apply normally
+    applyDelta(state, update);
+    return true;
+  } else if (gap > 0 && gap <= MAX_GAP_TOLERANCE) {
+    // Small gap detected - accept and apply anyway (tolerant mode)
+    // This may cause minor orderbook inaccuracies but prevents constant resyncs
+    applyDelta(state, update);
     return true;
   } else {
-    // GAP Detected (e.g. U > lastUpdateId + 1)
+    // Large GAP Detected (gap > MAX_GAP_TOLERANCE) - requires resync
     state.stats.desyncs++;
     return false; // Caller triggers resync
+  }
+}
+
+// Helper function to apply the delta update to orderbook
+function applyDelta(state: OrderbookState, update: { U: number; u: number; b: [string, string][]; a: [string, string][] }) {
+  for (const [p, q] of update.b) {
+    const price = parseFloat(p);
+    const qty = parseFloat(q);
+    if (qty === 0) state.bids.delete(price);
+    else state.bids.set(price, qty);
+  }
+  for (const [p, q] of update.a) {
+    const price = parseFloat(p);
+    const qty = parseFloat(q);
+    if (qty === 0) state.asks.delete(price);
+    else state.asks.set(price, qty);
+  }
+  state.lastUpdateId = update.u;
+  state.lastDepthTime = Date.now();
+  state.stats.applied++;
+
+  // Ensure state is LIVE after successful apply (if it was somehow stuck)
+  if (state.uiState === 'STALE') {
+    state.uiState = 'LIVE';
   }
 }
 

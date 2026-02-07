@@ -31,7 +31,8 @@ export const Dashboard: React.FC = () => {
   useEffect(() => {
     const fetchPairs = async () => {
       try {
-        const proxyUrl = (import.meta as any).env?.VITE_PROXY_API || 'http://localhost:8787';
+        const hostname = window.location.hostname;
+        const proxyUrl = (import.meta as any).env?.VITE_PROXY_API || `http://${hostname}:8787`;
         const res = await fetch(`${proxyUrl}/api/exchange-info`);
         const data = await res.json();
         // Proxy already returns { symbols: string[] }
@@ -124,7 +125,12 @@ export const Dashboard: React.FC = () => {
           {selectedPairs.map(symbol => {
             const msg: MetricsMessage | undefined = marketData[symbol];
             if (!msg) return null;
-            return <MobileSymbolCard key={symbol} symbol={symbol} data={msg} showLatency={showLatency} />;
+            if (!msg) return null;
+            // Also log to verify data structure
+            if (symbol === 'BTCUSDT') {
+              console.log('[Dashboard] Rendering BTCUSDT', msg.bids?.length, msg.asks?.length);
+            }
+            return <MobileSymbolCard key={symbol} symbol={symbol} metrics={msg} showLatency={showLatency} />;
           })}
           {selectedPairs.length === 0 && (
             <div className="p-8 text-center text-zinc-600 bg-zinc-900/50 rounded-lg border border-zinc-800 border-dashed">

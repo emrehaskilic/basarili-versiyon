@@ -32,8 +32,8 @@ export class FundingMonitor {
 
   public start() {
     if (this.timer) return;
-    this.timer = setInterval(() => this.fetchAndUpdate().catch(() => {}), this.intervalMs);
-    this.fetchAndUpdate().catch(() => {});
+    this.timer = setInterval(() => this.fetchAndUpdate().catch(() => { }), this.intervalMs);
+    this.fetchAndUpdate().catch(() => { });
   }
 
   public stop() {
@@ -61,16 +61,22 @@ export class FundingMonitor {
   }
 
   private async fetchAndUpdate(): Promise<void> {
-    const url = `https://fapi.binance.com/fapi/v1/fundingRate?symbol=${this.symbol}&limit=1`;
-    const res = await fetch(url);
-    const data = await res.json();
-    if (Array.isArray(data) && data.length > 0) {
-      const entry = data[0];
-      const rate = parseFloat(entry.fundingRate);
-      const nextFundingTime = parseInt(entry.fundingTime, 10);
-      if (!isNaN(rate) && !isNaN(nextFundingTime)) {
-        this.update(rate, nextFundingTime);
+    try {
+      // Use premiumIndex which includes nextFundingTime
+      const url = `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${this.symbol}`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+
+      if (data && typeof data.lastFundingRate === 'string' && typeof data.nextFundingTime === 'number') {
+        const rate = parseFloat(data.lastFundingRate);
+        const nextFundingTime = data.nextFundingTime;
+        if (!isNaN(rate) && nextFundingTime > 0) {
+          this.update(rate, nextFundingTime);
+        }
       }
+    } catch (e) {
+      // Silently ignore fetch errors
     }
   }
 }

@@ -22,6 +22,24 @@ interface SymbolRowProps {
 const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false }) => {
   const [expanded, setExpanded] = useState(false);
   const { state, legacyMetrics, timeAndSales, cvd, openInterest, funding, absorption, bids, asks } = data;
+
+  // If we don't have legacy metrics yet (unseeded), render a placeholder row
+  if (!legacyMetrics) {
+    return (
+      <div className="border-b border-zinc-800/50 p-4 grid grid-cols-12 gap-4 items-center select-none animate-pulse">
+        <div className="col-span-2 flex items-center space-x-2">
+          <span className="text-zinc-500 w-4"></span>
+          <span className="font-bold text-zinc-500">{symbol}</span>
+          <span className="text-[10px] px-1.5 py-0.5 bg-zinc-800 text-zinc-600 rounded border border-zinc-800">PERP</span>
+        </div>
+        <div className="col-span-10 flex items-center justify-between">
+          <span className="text-zinc-600 text-xs">Waiting for metrics... ({state})</span>
+          <Badge state={state} />
+        </div>
+      </div>
+    );
+  }
+
   // Helper: compute pressure bar segments from OBI weighted.  OBI values
   // around zero should map to a midpoint of 50%.  We clamp to [-1, 1]
   // and scale to ±50.

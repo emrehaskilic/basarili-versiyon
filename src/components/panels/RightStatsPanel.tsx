@@ -147,22 +147,27 @@ const RightStatsPanel: React.FC<RightStatsPanelProps> = ({ metrics, showLatency 
 
       {/* Multi‑timeframe CVD */}
       <div className="grid grid-cols-3 gap-2">
-        {Object.entries(cvd).map(([tf, obj]) => (
-          <MetricTile
-            key={tf}
-            title={tf.toUpperCase()}
-            value={
-              <>
-                <span className={posNegClass(obj.delta)}>
-                  {obj.delta > 0 ? '+' : obj.delta < 0 ? '-' : ''}{formatNum(Math.abs(obj.delta), 2)}
-                </span>
-                {' Δ / '}
-                <span className="text-zinc-300">{formatNum(obj.cvd, 2)}</span>
-              </>
-            }
-            valueClassName=""
-            className="" />
-        ))}
+        {cvd && ['tf1m', 'tf5m', 'tf15m'].map((tf) => {
+          const obj = (cvd as any)[tf];
+          if (!obj || typeof obj.delta !== 'number') return null;
+          const label = tf === 'tf1m' ? '1M' : tf === 'tf5m' ? '5M' : '15M';
+          return (
+            <MetricTile
+              key={tf}
+              title={label}
+              value={
+                <>
+                  <span className={posNegClass(obj.delta)}>
+                    {obj.delta > 0 ? '+' : obj.delta < 0 ? '-' : ''}{formatNum(Math.abs(obj.delta), 2)}
+                  </span>
+                  {' Δ / '}
+                  <span className="text-zinc-300">{formatNum(obj.cvd ?? 0, 2)}</span>
+                </>
+              }
+              valueClassName=""
+              className="" />
+          );
+        })}
       </div>
 
       {/* Futures context */}
@@ -200,8 +205,8 @@ const RightStatsPanel: React.FC<RightStatsPanelProps> = ({ metrics, showLatency 
 
       {/* Absorption and state */}
       <div className="flex justify-between items-center mt-1">
-          <div className="text-zinc-500">Absorption: {absorption && absorption > 0 ? <span className="text-yellow-300">Detected</span> : <span className="text-zinc-500">None</span>}</div>
-          <Badge state={state} />
+        <div className="text-zinc-500">Absorption: {absorption && absorption > 0 ? <span className="text-yellow-300">Detected</span> : <span className="text-zinc-500">None</span>}</div>
+        <Badge state={state} />
       </div>
     </div>
   );

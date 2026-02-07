@@ -14,20 +14,47 @@ export interface OrderBookProps {
   currentPrice: number;
 }
 
-const OrderBook: React.FC<OrderBookProps> = ({ bids = [], asks = [], currentPrice }) => {
+const OrderBook: React.FC<OrderBookProps> = ({ bids, asks, currentPrice }) => {
+  // Ensure arrays are valid
+  const safeBids = Array.isArray(bids) ? bids : [];
+  const safeAsks = Array.isArray(asks) ? asks : [];
+
+  // Debug log
+  // console.log('[OrderBook]', { bidsLen: safeBids.length, asksLen: safeAsks.length, currentPrice });
+
   // Only display the first 8 levels on each side
   const depth = 8;
-  const displayBids = bids.slice(0, depth);
-  // For asks, the server returns asks sorted ascending (best ask first).  We
-  // reverse for display so that the best ask appears closest to the price
-  // line and deeper asks appear above.
-  const displayAsks = asks.slice(0, depth).reverse();
-  // Determine maximum total for scaling bars.  Use the last bid's total (largest)
-  // and the first ask's total (largest after reversing) scaled by 1.5 for asks.
+  const displayBids = safeBids.slice(0, depth);
+
+  // Asks handling:
+  // Server sends asks sorted ascending (best ask first): [100, 101, 102]
+  // We want to show (from top to bottom):
+  // 102 (idx 2)
+  // 101 (idx 1)
+  // 100 (idx 0) -- Closest to Mid Price
+  //
+  // So we take slice(0, depth) -> [100, 101, 102]
+  // And we map them.
+  // Using flex-col-reverse on the container:
+  // The first child (idx 0 -> 100) will be at the BOTTOM.
+  // The last child (idx 2 -> 102) will be at the TOP.
+  // This is exactly what we want!
+  //
+  // The previous code did .reverse() which made it [102, 101, 100].
+  // Then flex-col-reverse put 102 at BOTTOM and 100 at TOP.
+  // That was inverted.
+  // So we remove .reverse().
+
+  const displayAsks = safeAsks.slice(0, depth);
+
+  // Determine maximum total for scaling bars.
+  // For asks (now standard order), the first element is best ask (smallest total).
+  // The last element is deepest ask (largest total).
   const maxTotal = Math.max(
     displayBids.length > 0 ? displayBids[displayBids.length - 1][2] : 0,
-    displayAsks.length > 0 ? displayAsks[0][2] * 1.5 : 0,
+    displayAsks.length > 0 ? displayAsks[displayAsks.length - 1][2] * 1.5 : 0,
   ) || 1;
+
   return (
     <div className="w-full text-xs font-mono bg-zinc-950 p-2 rounded border border-zinc-800">
       <div className="flex justify-between text-zinc-500 mb-1 px-1">

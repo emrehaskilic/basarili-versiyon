@@ -65,10 +65,38 @@ export class CvdCalculator {
     for (const [tf, ms] of this.windows.entries()) {
       const arr = this.trades.get(tf)!;
       arr.push({ ...event, quantity: signedQty, arrival, price: event.price });
-      // Remove expired trades
+      // Remove expired trades based on trade timestamp
       const cutoff = event.timestamp - ms;
-      this.trades.set(tf, arr.filter(t => t.timestamp >= cutoff));
+      const filtered = arr.filter(t => t.timestamp >= cutoff);
+      this.trades.set(tf, filtered);
     }
+  }
+
+  /**
+   * Get trade counts for each timeframe (for debugging)
+   * Also returns warmup percentage showing how "full" each timeframe is
+   */
+  public getTradeCounts(): Record<string, { count: number; warmUpPct: number }> {
+    const counts: Record<string, { count: number; warmUpPct: number }> = {};
+    const now = Date.now();
+
+    for (const [tf, ms] of this.windows.entries()) {
+      const arr = this.trades.get(tf) ?? [];
+      const count = arr.length;
+
+      // Calculate warmup: how much of the timeframe window is filled with data
+      let warmUpPct = 100;
+      if (arr.length > 0) {
+        const oldest = arr[0].timestamp;
+        const span = now - oldest;
+        warmUpPct = Math.min(100, Math.round((span / ms) * 100));
+      } else {
+        warmUpPct = 0;
+      }
+
+      counts[tf] = { count, warmUpPct };
+    }
+    return counts;
   }
 
   /**
