@@ -328,6 +328,14 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
                   <span className="bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded-full font-mono">NO</span>
                 )}
               </div>
+              <div className="flex justify-between items-center text-[10px] mt-2">
+                <span className="text-zinc-500">Exhaustion Flag</span>
+                {legacyMetrics.exhaustion ? (
+                  <span className="bg-orange-900/40 text-orange-400 px-2 py-0.5 rounded-full font-mono animate-pulse">EXHAUSTED</span>
+                ) : (
+                  <span className="bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded-full font-mono">NORMAL</span>
+                )}
+              </div>
             </div>
           </div>
         </div>

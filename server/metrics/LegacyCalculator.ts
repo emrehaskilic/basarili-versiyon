@@ -1,4 +1,5 @@
 // [GITHUB VERIFIED] Backend implementation of OBI, VWAP, DeltaZ, CVD Slope, and Advanced Scores
+// Senior Quantitative Finance Developer Implementation
 import { OrderbookState, bestBid, bestAsk } from './OrderbookManager';
 
 // Type for a trade used in the legacy metrics calculations
@@ -8,6 +9,15 @@ interface LegacyTrade {
     side: 'buy' | 'sell';
     timestamp: number;
 }
+
+// Constants for metric calculations
+const EPSILON = 1e-12;
+const MAX_TRADES_WINDOW = 10_000; // Maximum trade window (10 seconds worth)
+const VOLATILITY_HISTORY_SIZE = 3600; // 1 hour of volatility history
+const ATR_WINDOW = 14;
+const SWEEP_DETECTION_WINDOW = 30;
+const BREAKOUT_WINDOW = 15;
+const ABSORPTION_WINDOW = 60;
 
 /**
  * LegacyCalculator computes additional orderflow metrics that were
@@ -23,6 +33,7 @@ interface LegacyTrade {
  * - CVD Slope
  * - Advanced Scores: Sweep, Breakout, Regime, Absorption
  * - Trade Signal
+ * - Exhaustion Detection
  */
 export class LegacyCalculator {
     // Keep a rolling list of trades for delta calculations (max 10 seconds)
@@ -34,6 +45,11 @@ export class LegacyCalculator {
     private cvdSession = 0;
     private totalVolume = 0;
     private totalNotional = 0;
+
+    // Advanced Metrics State
+    private volatilityHistory: number[] = [];
+    private volumeHistory: number[] = [];
+    private lastMidPrice = 0;
 
     /**
      * Add a trade to the calculator.  Updates rolling windows and
@@ -77,7 +93,342 @@ export class LegacyCalculator {
         if (this.cvdHistory.length > 60) {
             this.cvdHistory.shift();
         }
+        // Store volume history for absorption detection
+        this.volumeHistory.push(trade.quantity);
+        if (this.volumeHistory.length > 100) {
+            this.volumeHistory.shift();
+        }
     }
+
+    // =========================================================================
+    // HELPER FUNCTIONS
+    // =========================================================================
+
+    /**
+     * Calculate Average True Range (ATR) from recent trades
+     * ATR measures volatility using price differences
+     */
+    private calculateATR(): number {
+        if (this.trades.length < 2) return 0;
+
+        const trueRanges: number[] = [];
+        for (let i = 1; i < this.trades.length; i++) {
+            const current = this.trades[i].price;
+            const previous = this.trades[i - 1].price;
+            const tr = Math.abs(current - previous);
+            trueRanges.push(tr);
+        }
+
+        if (trueRanges.length === 0) return 0;
+        const windowSize = Math.min(ATR_WINDOW, trueRanges.length);
+        return trueRanges.slice(-windowSize).reduce((a, b) => a + b, 0) / windowSize;
+    }
+
+    /**
+     * Calculate Standard Deviation of an array
+     */
+    private calculateStdDev(values: number[]): number {
+        if (values.length === 0) return 0;
+        const mean = values.reduce((a, b) => a + b, 0) / values.length;
+        const variance = values.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / values.length;
+        return Math.sqrt(variance);
+    }
+
+    /**
+     * Linear Regression Slope calculation
+     */
+    private calculateSlope(values: number[]): number {
+        const n = values.length;
+        if (n < 2) return 0;
+
+        const xs = [...Array(n).keys()];
+        const ys = values;
+        const sumX = xs.reduce((a, b) => a + b, 0);
+        const sumY = ys.reduce((a, b) => a + b, 0);
+        const sumXX = xs.reduce((a, b) => a + b * b, 0);
+        const sumXY = xs.reduce((sum, x, i) => sum + x * ys[i], 0);
+        const denom = n * sumXX - sumX * sumX;
+
+        if (Math.abs(denom) < EPSILON) return 0;
+        return (n * sumXY - sumX * sumY) / denom;
+    }
+
+    // =========================================================================
+    // ADVANCED METRICS CALCULATIONS
+    // =========================================================================
+
+    /**
+     * GÖREV 1: Sweep/Fade Score
+     * 
+     * Sweep algılama: Agresif alıcıların/satıcıların orderbook'ta seviye
+     * atlayarak doldurması (sweep) veya kısmi doldurmaları (fade).
+     * 
+     * Sweep = İşlem fiyat hareketi >= bid-ask spread
+     * Fade = İşlem fiyat hareketi < bid-ask spread
+     * 
+     * @returns [-1.0, +1.0] - Positive = aggressive buyers, Negative = aggressive sellers
+     */
+    private calculateSweepFadeScore(spread: number, midPrice: number): number {
+        if (this.trades.length < 10) return 0;
+        if (spread < EPSILON) return 0;
+
+        const recentTrades = this.trades.slice(-SWEEP_DETECTION_WINDOW);
+        let sweepBuyVol = 0;
+        let sweepSellVol = 0;
+        let fadeBuyVol = 0;
+        let fadeSellVol = 0;
+
+        for (const trade of recentTrades) {
+            const priceDeviation = Math.abs(trade.price - midPrice);
+
+            // Sweep tanısı: Büyük spread atlayan işlem (>= %50 spread)
+            if (priceDeviation > spread * 0.5) {
+                if (trade.side === 'buy') {
+                    sweepBuyVol += trade.quantity;
+                } else {
+                    sweepSellVol += trade.quantity;
+                }
+            } else {
+                // Fade: Spread içinde kalan işlem
+                if (trade.side === 'buy') {
+                    fadeBuyVol += trade.quantity;
+                } else {
+                    fadeSellVol += trade.quantity;
+                }
+            }
+        }
+
+        // Combined score: Sweep dominance with fade adjustment
+        const totalSweep = sweepBuyVol + sweepSellVol;
+        const totalFade = fadeBuyVol + fadeSellVol;
+        const totalVol = totalSweep + totalFade;
+
+        if (totalVol < EPSILON) return 0;
+
+        // Sweep'lerin net yönü (ağırlıklı)
+        const sweepNet = totalSweep > 0 ? (sweepBuyVol - sweepSellVol) / totalSweep : 0;
+        // Fade'lerin net yönü (daha az ağırlık)
+        const fadeNet = totalFade > 0 ? (fadeBuyVol - fadeSellVol) / totalFade : 0;
+
+        // Sweep'e %70, Fade'e %30 ağırlık
+        const sweepWeight = totalSweep / totalVol;
+        const score = sweepNet * sweepWeight + fadeNet * (1 - sweepWeight) * 0.3;
+
+        return Math.max(-1, Math.min(1, score));
+    }
+
+    /**
+     * GÖREV 2: Breakout Score (Momentum)
+     * 
+     * Breakout momentumu, fiyatın yönü ve hızını kaç saniye boyunca
+     * koruduğunu ölçer. ATR ile normalize edilir.
+     * 
+     * Formula: (Current MA - Previous MA) / ATR
+     * 
+     * @returns [-1.0, +1.0] - +1.0 = Strong UPTREND, -1.0 = Strong DOWNTREND
+     */
+    private calculateBreakoutScore(delta1s: number): number {
+        if (this.trades.length < 5) return 0;
+
+        const recentPrices = this.trades.slice(-BREAKOUT_WINDOW).map(t => t.price);
+        const n = recentPrices.length;
+        if (n < 2) return 0;
+
+        // 1. Trend Eğimi (Linear Regression)
+        const slope = this.calculateSlope(recentPrices);
+
+        // 2. ATR (Average True Range) hesabı
+        const atr = this.calculateATR();
+        if (atr < EPSILON) return 0;
+
+        // 3. Normalize slope by ATR
+        const normalizedSlope = slope / atr;
+
+        // 4. Delta confirmation (momentum check)
+        // Eğer delta aynı yönde ise güven artar
+        const deltaConfirm = Math.sign(delta1s) === Math.sign(slope) ? 1.0 : 0.5;
+
+        // 5. Volume confirmation (son 5 işlem ortalamanın üstünde mi?)
+        const recentVol = this.trades.slice(-5).reduce((sum, t) => sum + t.quantity, 0);
+        const avgVol = this.volumeHistory.length > 0
+            ? this.volumeHistory.reduce((a, b) => a + b, 0) / this.volumeHistory.length
+            : recentVol / 5;
+        const volumeConfirm = recentVol > avgVol * 0.8 ? 1.0 : 0.7;
+
+        const score = normalizedSlope * deltaConfirm * volumeConfirm;
+        return Math.max(-1, Math.min(1, score));
+    }
+
+    /**
+     * GÖREV 3: Regime Weight (Volatilite Ağırlığı)
+     * 
+     * Market volatilitesini ölçer.
+     * - Yüksek volatilite = 1.0 (Danger Zone)
+     * - Düşük volatilite = 0.0 (Stagnation)
+     * 
+     * Formula: Current Volatility / Historical Max Volatility
+     * 
+     * @returns [0.0, 1.0]
+     */
+    private calculateRegimeWeight(): number {
+        if (this.trades.length < 5) return 0;
+
+        const recentPrices = this.trades.slice(-30).map(t => t.price);
+        if (recentPrices.length < 2) return 0;
+
+        // 1. Returns hesabı (logaritmik dönüşler)
+        const returns: number[] = [];
+        for (let i = 1; i < recentPrices.length; i++) {
+            const ret = (recentPrices[i] - recentPrices[i - 1]) / recentPrices[i - 1];
+            returns.push(ret);
+        }
+
+        if (returns.length === 0) return 0;
+
+        // 2. Current Volatility (Standard Deviation of Returns)
+        const currentVol = this.calculateStdDev(returns);
+
+        // 3. Volatilite history'ye ekle
+        this.volatilityHistory.push(currentVol);
+        if (this.volatilityHistory.length > VOLATILITY_HISTORY_SIZE) {
+            this.volatilityHistory.shift();
+        }
+
+        // 4. Historical Max (son 1 saat içindeki en yüksek volatilite)
+        const maxVol = Math.max(
+            ...this.volatilityHistory,
+            currentVol * 1.1 // Minimum %10 buffer
+        );
+
+        if (maxVol < EPSILON) return 0;
+
+        // 5. Normalize [0, 1]
+        return Math.min(1.0, currentVol / maxVol);
+    }
+
+    /**
+     * GÖREV 4: Absorption Score (Geliştirilmiş)
+     * 
+     * Emilim gücünü ölçer: Yüksek hacim + Düşük fiyat hareketi = Yüksek absorption
+     * 
+     * Formula: (Volume Intensity * Price Stability) * Direction Confidence
+     * 
+     * @returns [0.0, 1.0] - 0.7-1.0 = Güçlü emilim (Büyük katılımcı var)
+     */
+    private calculateAbsorptionScore(delta1s: number): number {
+        if (this.trades.length < 5) return 0;
+
+        const window = this.trades.slice(-ABSORPTION_WINDOW);
+        if (window.length < 5) return 0;
+
+        const prices = window.map(t => t.price);
+        const quantities = window.map(t => t.quantity);
+
+        // 1. Volume Intensity
+        const totalVol = quantities.reduce((sum, q) => sum + q, 0);
+        const avgVol = totalVol / window.length;
+        const recentVol = quantities.slice(-10).reduce((sum, q) => sum + q, 0) / Math.min(10, quantities.length);
+        const volumeIntensity = avgVol > EPSILON
+            ? Math.min(2.0, recentVol / avgVol) / 2
+            : 0;
+
+        // 2. Price Stability (1 - normalized range)
+        const minPrice = Math.min(...prices);
+        const maxPrice = Math.max(...prices);
+        const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+        const priceRange = avgPrice > EPSILON ? (maxPrice - minPrice) / avgPrice : 0;
+        // 1% range = 0 stability, 0% range = 1 stability
+        const priceStability = Math.max(0, 1 - priceRange * 100);
+
+        // 3. Direction Confidence (tutarlılık)
+        // Son 10 işlemin kaçı aynı yönde?
+        const recentTrades = window.slice(-10);
+        const buyCount = recentTrades.filter(t => t.side === 'buy').length;
+        const sellCount = recentTrades.length - buyCount;
+        const dominance = Math.abs(buyCount - sellCount) / recentTrades.length;
+
+        // 4. Delta stability (delta değişimi az mı?)
+        const deltaStability = this.deltaHistory.length >= 5
+            ? 1 - Math.min(1, this.calculateStdDev(this.deltaHistory.slice(-5)) / (Math.abs(delta1s) + EPSILON))
+            : 0.5;
+
+        // 5. Combine all factors
+        let absorptionScore = volumeIntensity * priceStability * (0.5 + dominance * 0.5) * (0.7 + deltaStability * 0.3);
+
+        // 6. Iceberg detection boost
+        // Eğer hacim yüksek ama spread değişmiyorsa = gizli likidite
+        if (volumeIntensity > 0.5 && priceStability > 0.8) {
+            absorptionScore *= 1.3; // Boost
+        }
+
+        return Math.min(1.0, absorptionScore);
+    }
+
+    /**
+     * GÖREV 5: Exhaustion Detection (Tükeniş Algılama)
+     * 
+     * Multi-Level Confirmation:
+     * 1. CVD-Price Divergence
+     * 2. Delta Z Reversal
+     * 3. CVD Slope Flatline
+     * 4. Volume Declining
+     * 
+     * @returns true if exhaustion detected (>= 3 conditions true)
+     */
+    private calculateExhaustion(
+        cvd: number,
+        deltaZ: number,
+        priceChange: number,
+        cvdSlope: number
+    ): boolean {
+        let exhaustionCount = 0;
+
+        // 1. CVD-Price Divergence
+        if ((cvd > 0 && priceChange < -0.05) || (cvd < 0 && priceChange > 0.05)) {
+            exhaustionCount++;
+        }
+
+        // 2. Delta Z Reversal
+        if (this.deltaHistory.length >= 2) {
+            const lastSign = Math.sign(this.deltaHistory[this.deltaHistory.length - 1]);
+            const prevSign = Math.sign(this.deltaHistory[this.deltaHistory.length - 2]);
+            if (lastSign !== prevSign && lastSign !== 0 && prevSign !== 0) {
+                exhaustionCount++;
+            }
+        }
+
+        // 3. CVD Slope Flatline (slope çok düşük)
+        if (Math.abs(cvdSlope) < 5) {
+            exhaustionCount++;
+        }
+
+        // 4. Volume Declining
+        if (this.volumeHistory.length >= 20) {
+            const recent10 = this.volumeHistory.slice(-10).reduce((a, b) => a + b, 0);
+            const prev10 = this.volumeHistory.slice(-20, -10).reduce((a, b) => a + b, 0);
+            if (recent10 < prev10 * 0.8) {
+                exhaustionCount++;
+            }
+        }
+
+        // 5. Delta momentum fading
+        if (this.deltaHistory.length >= 5) {
+            const recentDeltas = this.deltaHistory.slice(-5);
+            const deltaDecreasing = recentDeltas.every((d, i, arr) =>
+                i === 0 || Math.abs(d) <= Math.abs(arr[i - 1]) * 1.1
+            );
+            if (deltaDecreasing) {
+                exhaustionCount++;
+            }
+        }
+
+        // En az 3 koşul true ise exhaustion
+        return exhaustionCount >= 3;
+    }
+
+    // =========================================================================
+    // MAIN COMPUTE METHOD
+    // =========================================================================
 
     /**
      * Compute the current legacy metrics given the current orderbook
@@ -98,8 +449,6 @@ export class LegacyCalculator {
             return vol;
         };
 
-        const epsilon = 1e-9;
-
         // --- A) OBI Weighted (Normalized) ---
         // Top 10 levels
         const bidVol10 = calcVolume(ob.bids, 10, false);
@@ -108,25 +457,24 @@ export class LegacyCalculator {
         const rawObiWeighted = bidVol10 - askVol10;
         const denomWeighted = bidVol10 + askVol10;
         // Range: [-1, +1]
-        const obiWeighted = rawObiWeighted / Math.max(denomWeighted, epsilon);
+        const obiWeighted = denomWeighted > EPSILON ? rawObiWeighted / denomWeighted : 0;
 
         // --- B) OBI Deep Book (Normalized) ---
-        // Top 50 levels (representing deep liquidty)
+        // Top 50 levels (representing deep liquidity)
         const bidVol50 = calcVolume(ob.bids, 50, false);
         const askVol50 = calcVolume(ob.asks, 50, true);
 
         const rawObiDeep = bidVol50 - askVol50;
         const denomDeep = bidVol50 + askVol50;
         // Range: [-1, +1]
-        const obiDeep = rawObiDeep / Math.max(denomDeep, epsilon);
+        const obiDeep = denomDeep > EPSILON ? rawObiDeep / denomDeep : 0;
 
         // --- C) OBI Divergence (Stable Definition) ---
         // Difference between weighted (near) and deep OBI
         // Range: [-2, +2]
         const obiDivergence = obiWeighted - obiDeep;
+
         // Recompute rolling delta windows.
-        // Use last trade timestamp as reference to avoid clock skew between 
-        // Binance server time and local time.
         const refTime = this.trades.length > 0
             ? this.trades[this.trades.length - 1].timestamp
             : Date.now();
@@ -140,120 +488,75 @@ export class LegacyCalculator {
                 delta5s += t.side === 'buy' ? t.quantity : -t.quantity;
             }
         }
+
         // Z‐score of delta1s: (value - mean) / std
         let deltaZ = 0;
         if (this.deltaHistory.length >= 5) {
             const mean = this.deltaHistory.reduce((a, b) => a + b, 0) / this.deltaHistory.length;
             const variance = this.deltaHistory.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / this.deltaHistory.length;
-            const std = Math.sqrt(variance) || 1;
-            deltaZ = (delta1s - mean) / std;
+            const std = Math.sqrt(variance);
+            deltaZ = std > EPSILON ? (delta1s - mean) / std : 0;
         }
+
         // CVD slope: simple linear regression on the last cvdHistory values
-        let cvdSlope = 0;
-        const historyLen = this.cvdHistory.length;
-        if (historyLen >= 2) {
-            // Compute slope using least squares
-            const xs = [...Array(historyLen).keys()].map(i => i);
-            const ys = this.cvdHistory;
-            const n = historyLen;
-            const sumX = xs.reduce((a, b) => a + b, 0);
-            const sumY = ys.reduce((a, b) => a + b, 0);
-            const sumXX = xs.reduce((a, b) => a + b * b, 0);
-            const sumXY = xs.reduce((sum, x, i) => sum + x * ys[i], 0);
-            const denom = n * sumXX - sumX * sumX;
-            if (denom !== 0) {
-                cvdSlope = (n * sumXY - sumX * sumY) / denom;
-            }
-        }
+        const cvdSlope = this.calculateSlope(this.cvdHistory);
+
         // VWAP: totalNotional / totalVolume
-        const vwap = this.totalVolume > 0 ? this.totalNotional / this.totalVolume : 0;
+        const vwap = this.totalVolume > EPSILON ? this.totalNotional / this.totalVolume : 0;
+
         // Compose object
         const bestBidPrice = bestBid(ob) ?? 0;
         const bestAskPrice = bestAsk(ob) ?? 0;
+        const spread = bestAskPrice - bestBidPrice;
         const midPrice = (bestBidPrice + bestAskPrice) / 2;
+
+        // Calculate price change for exhaustion
+        const priceChange = this.lastMidPrice > EPSILON
+            ? (midPrice - this.lastMidPrice) / this.lastMidPrice
+            : 0;
+        this.lastMidPrice = midPrice;
 
         // ===== ADVANCED METRICS CALCULATIONS =====
 
         // --- Sweep/Fade Score ---
-        // Measures aggressive buying vs selling momentum
-        // Positive = aggressive buyers sweeping asks, Negative = aggressive sellers hitting bids
-        let sweepFadeScore = 0;
-        if (this.trades.length >= 2) {
-            const recentTrades = this.trades.slice(-20); // Last 20 trades
-            let buyVol = 0, sellVol = 0;
-            for (const t of recentTrades) {
-                if (t.side === 'buy') buyVol += t.quantity;
-                else sellVol += t.quantity;
-            }
-            const total = buyVol + sellVol;
-            if (total > 0) {
-                sweepFadeScore = (buyVol - sellVol) / total; // Range: [-1, +1]
-            }
-        }
+        const sweepFadeScore = this.calculateSweepFadeScore(spread, midPrice);
 
-        // --- Breakout Score (Momentum) ---
-        // Measures price momentum based on recent price movement direction
-        // Uses the slope of recent trade prices
-        let breakoutScore = 0;
-        if (this.trades.length >= 5) {
-            const recentPrices = this.trades.slice(-10).map(t => t.price);
-            if (recentPrices.length >= 2) {
-                const firstHalf = recentPrices.slice(0, Math.floor(recentPrices.length / 2));
-                const secondHalf = recentPrices.slice(Math.floor(recentPrices.length / 2));
-                const avgFirst = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
-                const avgSecond = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
-                // Normalize by typical price movement (use spread as reference)
-                const spread = bestAskPrice - bestBidPrice;
-                if (spread > 0) {
-                    breakoutScore = Math.max(-1, Math.min(1, (avgSecond - avgFirst) / (spread * 5)));
-                }
-            }
-        }
+        // --- Breakout Score ---
+        const breakoutScore = this.calculateBreakoutScore(delta1s);
 
-        // --- Regime Weight (Volatility) ---
-        // Measures market volatility based on price range in recent trades
-        let regimeWeight = 0;
-        if (this.trades.length >= 5) {
-            const recentPrices = this.trades.slice(-20).map(t => t.price);
-            const minPrice = Math.min(...recentPrices);
-            const maxPrice = Math.max(...recentPrices);
-            const range = maxPrice - minPrice;
-            const avgPrice = recentPrices.reduce((a, b) => a + b, 0) / recentPrices.length;
-            // Normalize range relative to price (as percentage)
-            if (avgPrice > 0) {
-                const rangePct = (range / avgPrice) * 100;
-                // Scale: 0-0.1% = low vol, 0.1-0.5% = normal, >0.5% = high vol
-                regimeWeight = Math.min(1, rangePct * 2); // Cap at 1
-            }
-        }
+        // --- Regime Weight ---
+        const regimeWeight = this.calculateRegimeWeight();
 
         // --- Absorption Score ---
-        // Detects absorption: large volume with small price movement
-        // Calculated from trade data: high volume + low price change = absorption
-        let absorptionScore = 0;
-        if (this.trades.length >= 5) {
-            const window = this.trades.slice(-30);
-            const totalVol = window.reduce((sum, t) => sum + t.quantity, 0);
-            const prices = window.map(t => t.price);
-            const priceChange = Math.abs(prices[prices.length - 1] - prices[0]);
-            const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+        const absorptionScore = this.calculateAbsorptionScore(delta1s);
 
-            if (avgPrice > 0 && totalVol > 0) {
-                // High volume with low price change = absorption
-                const priceChangePct = (priceChange / avgPrice) * 100;
-                const volumeNorm = Math.min(totalVol / 10, 1); // Normalize volume
-                // Low price change + high volume = high absorption
-                if (priceChangePct < 0.05 && volumeNorm > 0.2) {
-                    absorptionScore = volumeNorm * (1 - priceChangePct * 20);
-                }
-            }
-        }
+        // --- Exhaustion Flag ---
+        const exhaustion = this.calculateExhaustion(this.cvdSession, deltaZ, priceChange, cvdSlope);
 
         // --- Signal ---
-        // Simple composite signal: OBI + DeltaZ + Slope
+        // Enhanced composite signal with multiple confirmations
         let tradeSignal = 0; // 0=Neutral, 1=Buy, -1=Sell
-        if (obiWeighted > 0.25 && deltaZ > 1.0 && cvdSlope > 0) tradeSignal = 1;
-        else if (obiWeighted < -0.25 && deltaZ < -1.0 && cvdSlope < 0) tradeSignal = -1;
+
+        // Buy conditions
+        const buyConditions = [
+            obiWeighted > 0.2,
+            deltaZ > 0.8,
+            cvdSlope > 0,
+            sweepFadeScore > 0.3,
+            breakoutScore > 0.2
+        ].filter(Boolean).length;
+
+        // Sell conditions
+        const sellConditions = [
+            obiWeighted < -0.2,
+            deltaZ < -0.8,
+            cvdSlope < 0,
+            sweepFadeScore < -0.3,
+            breakoutScore < -0.2
+        ].filter(Boolean).length;
+
+        if (buyConditions >= 3 && !exhaustion) tradeSignal = 1;
+        else if (sellConditions >= 3 && !exhaustion) tradeSignal = -1;
 
         return {
             price: midPrice,
@@ -273,7 +576,8 @@ export class LegacyCalculator {
             breakoutScore,
             regimeWeight,
             tradeCount: this.trades.length,
-            tradeSignal
+            tradeSignal,
+            exhaustion
         };
     }
 }

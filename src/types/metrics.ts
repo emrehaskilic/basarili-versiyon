@@ -42,6 +42,7 @@ export interface LegacyMetrics {
   regimeWeight: number;
   tradeCount: number;
   tradeSignal?: number; // 1=Buy, -1=Sell, 0=Neutral
+  exhaustion?: boolean; // True = market exhaustion detected
 }
 
 /**
