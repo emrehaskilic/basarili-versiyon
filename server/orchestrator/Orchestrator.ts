@@ -36,8 +36,8 @@ export class Orchestrator {
   ) {
     this.decisionEngine = new DecisionEngine({
       expectedPrice: (symbol, side, type, limitPrice) => this.connector.expectedPrice(symbol, side, type, limitPrice),
-      riskPerTradePercent: config.riskPerTradePercent,
-      maxLeverage: config.maxLeverage,
+      getRiskPerTradePercent: () => this.capitalSettings.walletUsagePercent,
+      getMaxLeverage: () => this.capitalSettings.leverage,
     });
 
     this.logger = new OrchestratorLogger({

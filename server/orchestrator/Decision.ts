@@ -2,12 +2,12 @@ import { DecisionAction, GateResult, OrchestratorMetricsInput, SymbolState } fro
 
 export interface DecisionDependencies {
   expectedPrice: (symbol: string, side: 'BUY' | 'SELL', type: 'MARKET' | 'LIMIT', limitPrice?: number) => number | null;
-  riskPerTradePercent: number;
-  maxLeverage: number;
+  getRiskPerTradePercent: () => number;
+  getMaxLeverage: () => number;
 }
 
 export class DecisionEngine {
-  constructor(private readonly deps: DecisionDependencies) {}
+  constructor(private readonly deps: DecisionDependencies) { }
 
   evaluate(input: {
     symbol: string;
@@ -151,12 +151,14 @@ export class DecisionEngine {
     obiDeep: number;
     execPoor: boolean;
   }): number {
-    const riskBudget = (input.availableBalance * this.deps.riskPerTradePercent) / 100;
+    const riskPerTradePercent = this.deps.getRiskPerTradePercent();
+    const maxLeverage = this.deps.getMaxLeverage();
+    const riskBudget = (input.availableBalance * riskPerTradePercent) / 100;
     const probeRisk = riskBudget * 0.25;
 
     const uncertaintyCapFromObi = Math.abs(input.obiDeep) < 0.2 ? 10 : 50;
     const dynamicLevCap = Math.min(
-      this.deps.maxLeverage,
+      maxLeverage,
       50 / (Math.abs(input.deltaZ) + 0.5),
       input.execPoor ? 20 : 100,
       uncertaintyCapFromObi
