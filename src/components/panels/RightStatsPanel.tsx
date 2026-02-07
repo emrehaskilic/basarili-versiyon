@@ -65,53 +65,81 @@ const RightStatsPanel: React.FC<RightStatsPanelProps> = ({ metrics, showLatency 
         <ScoreBar segments={[{ width: bidWidth, colour: 'bg-green-500' }, { width: askWidth, colour: 'bg-red-500' }]} height={4} />
       </div>
 
-      {/* Advanced legacy scores (Sweep, Breakout, Regime, Absorption) */}
+      {/* Advanced Metrics Cards */}
       {lm && (
-        <div className="grid grid-cols-2 gap-4 mt-2 pt-2 border-t border-zinc-800 border-dashed">
-          {/* Sweep Strength */}
-          <div>
-            <ScoreBar
-              segments={[{ width: Math.min(100, Math.abs(lm.sweepFadeScore) * 100), colour: 'bg-purple-500' }]}
-              height={4}
-            />
-            <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
-              <span>Sweep Strength</span>
-              <span className="text-zinc-300 font-mono">{lm.sweepFadeScore.toFixed(1)}</span>
+        <div className="mt-3 space-y-2">
+          <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">
+            Advanced Metrics
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+            {/* Sweep */}
+            <div className="flex flex-col h-16 justify-between p-2 bg-purple-500/10 rounded border border-purple-500/20">
+              <div className="flex justify-between items-center">
+                <span className="text-[9px] font-bold text-zinc-500 uppercase">Sweep</span>
+                <span className={`text-xs font-mono font-bold ${lm.sweepFadeScore > 0 ? 'text-green-400' : lm.sweepFadeScore < 0 ? 'text-red-400' : 'text-zinc-400'}`}>
+                  {lm.sweepFadeScore >= 0 ? '+' : ''}{lm.sweepFadeScore.toFixed(2)}
+                </span>
+              </div>
+              <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
+                <div className={`h-full ${lm.sweepFadeScore > 0 ? 'bg-green-500' : 'bg-red-500'}`} style={{ width: `${Math.min(100, Math.abs(lm.sweepFadeScore) * 100)}%` }} />
+              </div>
+              <div className="text-[7px] text-zinc-500">
+                {lm.sweepFadeScore > 0.3 ? '🟢 Buy' : lm.sweepFadeScore < -0.3 ? '🔴 Sell' : '⚪ Bal'}
+              </div>
+            </div>
+            {/* Breakout */}
+            <div className="flex flex-col h-16 justify-between p-2 bg-pink-500/10 rounded border border-pink-500/20">
+              <div className="flex justify-between items-center">
+                <span className="text-[9px] font-bold text-zinc-500 uppercase">Breakout</span>
+                <span className={`text-xs font-mono font-bold ${lm.breakoutScore > 0 ? 'text-blue-400' : lm.breakoutScore < 0 ? 'text-orange-400' : 'text-zinc-400'}`}>
+                  {lm.breakoutScore >= 0 ? '+' : ''}{lm.breakoutScore.toFixed(2)}
+                </span>
+              </div>
+              <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
+                <div className={`h-full ${lm.breakoutScore > 0 ? 'bg-blue-500' : 'bg-orange-500'}`} style={{ width: `${Math.min(100, Math.abs(lm.breakoutScore) * 100)}%` }} />
+              </div>
+              <div className="text-[7px] text-zinc-500">
+                {lm.breakoutScore > 0.3 ? '📈 Up' : lm.breakoutScore < -0.3 ? '📉 Down' : '➡️ Side'}
+              </div>
+            </div>
+            {/* Volatility */}
+            <div className="flex flex-col h-16 justify-between p-2 bg-cyan-500/10 rounded border border-cyan-500/20">
+              <div className="flex justify-between items-center">
+                <span className="text-[9px] font-bold text-zinc-500 uppercase">Vol</span>
+                <span className="text-xs font-mono font-bold text-cyan-400">
+                  {(lm.regimeWeight * 100).toFixed(0)}%
+                </span>
+              </div>
+              <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
+                <div className={`h-full ${lm.regimeWeight > 0.7 ? 'bg-red-500' : lm.regimeWeight > 0.4 ? 'bg-yellow-500' : 'bg-green-500'}`} style={{ width: `${Math.min(100, lm.regimeWeight * 100)}%` }} />
+              </div>
+              <div className="text-[7px] text-zinc-500">
+                {lm.regimeWeight > 0.7 ? '🔥 High' : lm.regimeWeight > 0.4 ? '⚠️ Norm' : '🧊 Low'}
+              </div>
+            </div>
+            {/* Absorption */}
+            <div className="flex flex-col h-16 justify-between p-2 bg-yellow-500/10 rounded border border-yellow-500/20">
+              <div className="flex justify-between items-center">
+                <span className="text-[9px] font-bold text-zinc-500 uppercase">Absorb</span>
+                <span className="text-xs font-mono font-bold text-yellow-400">
+                  {(lm.absorptionScore * 100).toFixed(0)}%
+                </span>
+              </div>
+              <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
+                <div className={`h-full ${lm.absorptionScore > 0.7 ? 'bg-yellow-500' : lm.absorptionScore > 0.3 ? 'bg-amber-500' : 'bg-zinc-600'}`} style={{ width: `${Math.min(100, lm.absorptionScore * 100)}%` }} />
+              </div>
+              <div className="text-[7px] text-zinc-500">
+                {lm.absorptionScore > 0.7 ? '💪 Strong' : lm.absorptionScore > 0.3 ? '📦 Mod' : '⏳ Weak'}
+              </div>
             </div>
           </div>
-          {/* Breakout Momentum */}
-          <div>
-            <ScoreBar
-              segments={[{ width: Math.min(100, Math.abs(lm.breakoutScore) * 100), colour: 'bg-orange-500' }]}
-              height={4}
-            />
-            <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
-              <span>Breakout Mom.</span>
-              <span className="text-zinc-300 font-mono">{lm.breakoutScore.toFixed(1)}</span>
+          {/* Exhaustion Alert - Compact */}
+          {lm.exhaustion && (
+            <div className="px-2 py-1.5 bg-orange-900/30 border-l-2 border-orange-500 rounded-r">
+              <span className="text-[10px] text-orange-400 font-bold">⚠️ EXHAUSTION</span>
+              <span className="text-[9px] text-orange-300/70 ml-2">Momentum fading</span>
             </div>
-          </div>
-          {/* Regime Volatility */}
-          <div>
-            <ScoreBar
-              segments={[{ width: Math.min(100, Math.abs(lm.regimeWeight) * 100), colour: 'bg-cyan-500' }]}
-              height={4}
-            />
-            <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
-              <span>Regime Vol</span>
-              <span className="text-zinc-300 font-mono">{lm.regimeWeight.toFixed(1)}</span>
-            </div>
-          </div>
-          {/* Absorption Score */}
-          <div>
-            <ScoreBar
-              segments={[{ width: Math.min(100, Math.abs(lm.absorptionScore) * 100), colour: 'bg-yellow-400' }]}
-              height={4}
-            />
-            <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
-              <span>Absorption</span>
-              <span className="text-zinc-300 font-mono">{lm.absorptionScore.toFixed(1)}</span>
-            </div>
-          </div>
+          )}
         </div>
       )}
 

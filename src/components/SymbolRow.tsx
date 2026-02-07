@@ -184,36 +184,105 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
                   <span>Ask Pressure</span>
                 </div>
                 <ScoreBar segments={computePressureSegments(legacyMetrics.obiWeighted)} height={4} />
-                {/* Advanced scores */}
-                <div className="grid grid-cols-2 gap-4 mt-4 pt-2 border-t border-zinc-800 border-dashed">
-                  <div>
-                    <ScoreBar segments={[{ width: Math.min(100, Math.abs(legacyMetrics.sweepFadeScore) * 100), colour: 'bg-purple-500' }]} height={4} />
-                    <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
-                      <span>Sweep Strength</span>
-                      <span className="text-zinc-300 font-mono">{legacyMetrics.sweepFadeScore.toFixed(1)}</span>
+
+                {/* Advanced Metrics - Responsive Grid */}
+                <div className="mt-4 pt-4 border-t border-zinc-800/50">
+                  <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-3">
+                    Advanced Metrics
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                    {/* Sweep Strength */}
+                    <div className="flex flex-col h-20 justify-between p-2.5 bg-purple-500/10 rounded-lg border border-purple-500/20">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-bold text-zinc-500 uppercase">Sweep</span>
+                        <span className={`text-sm font-mono font-bold ${legacyMetrics.sweepFadeScore > 0 ? 'text-green-400' : legacyMetrics.sweepFadeScore < 0 ? 'text-red-400' : 'text-zinc-400'}`}>
+                          {legacyMetrics.sweepFadeScore >= 0 ? '+' : ''}{legacyMetrics.sweepFadeScore.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden flex">
+                        <div className="h-full bg-green-500 transition-all" style={{ width: `${legacyMetrics.sweepFadeScore > 0 ? Math.min(50, legacyMetrics.sweepFadeScore * 50) : 0}%`, marginLeft: '50%' }} />
+                        <div className="h-full bg-red-500 transition-all" style={{ width: `${legacyMetrics.sweepFadeScore < 0 ? Math.min(50, Math.abs(legacyMetrics.sweepFadeScore) * 50) : 0}%`, marginRight: '50%', order: -1 }} />
+                      </div>
+                      <div className="text-[8px] text-zinc-500">
+                        {legacyMetrics.sweepFadeScore > 0.3 ? '🟢 Buy Sweep' : legacyMetrics.sweepFadeScore < -0.3 ? '🔴 Sell Sweep' : '⚪ Balanced'}
+                      </div>
+                    </div>
+
+                    {/* Breakout Momentum */}
+                    <div className="flex flex-col h-20 justify-between p-2.5 bg-pink-500/10 rounded-lg border border-pink-500/20">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-bold text-zinc-500 uppercase">Breakout</span>
+                        <span className={`text-sm font-mono font-bold ${legacyMetrics.breakoutScore > 0 ? 'text-blue-400' : legacyMetrics.breakoutScore < 0 ? 'text-orange-400' : 'text-zinc-400'}`}>
+                          {legacyMetrics.breakoutScore >= 0 ? '+' : ''}{legacyMetrics.breakoutScore.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full transition-all ${legacyMetrics.breakoutScore > 0 ? 'bg-blue-500' : 'bg-orange-500'}`}
+                          style={{ width: `${Math.min(100, Math.abs(legacyMetrics.breakoutScore) * 100)}%` }}
+                        />
+                      </div>
+                      <div className="text-[8px] text-zinc-500">
+                        {legacyMetrics.breakoutScore > 0.3 ? '📈 Uptrend' : legacyMetrics.breakoutScore < -0.3 ? '📉 Downtrend' : '➡️ Sideways'}
+                      </div>
+                    </div>
+
+                    {/* Regime Volatility */}
+                    <div className="flex flex-col h-20 justify-between p-2.5 bg-cyan-500/10 rounded-lg border border-cyan-500/20">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-bold text-zinc-500 uppercase">Volatility</span>
+                        <span className="text-sm font-mono font-bold text-cyan-400">
+                          {(legacyMetrics.regimeWeight * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full transition-all ${legacyMetrics.regimeWeight > 0.7 ? 'bg-red-500' : legacyMetrics.regimeWeight > 0.4 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                          style={{ width: `${Math.min(100, legacyMetrics.regimeWeight * 100)}%` }}
+                        />
+                      </div>
+                      <div className="text-[8px] text-zinc-500">
+                        {legacyMetrics.regimeWeight > 0.7 ? '🔥 High Vol' : legacyMetrics.regimeWeight > 0.4 ? '⚠️ Normal' : '🧊 Low Vol'}
+                      </div>
+                    </div>
+
+                    {/* Absorption */}
+                    <div className="flex flex-col h-20 justify-between p-2.5 bg-yellow-500/10 rounded-lg border border-yellow-500/20">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-bold text-zinc-500 uppercase">Absorption</span>
+                        <span className="text-sm font-mono font-bold text-yellow-400">
+                          {(legacyMetrics.absorptionScore * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full transition-all ${legacyMetrics.absorptionScore > 0.7 ? 'bg-yellow-500' : legacyMetrics.absorptionScore > 0.3 ? 'bg-amber-500' : 'bg-zinc-600'}`}
+                          style={{ width: `${Math.min(100, legacyMetrics.absorptionScore * 100)}%` }}
+                        />
+                      </div>
+                      <div className="text-[8px] text-zinc-500">
+                        {legacyMetrics.absorptionScore > 0.7 ? '💪 Strong' : legacyMetrics.absorptionScore > 0.3 ? '📦 Moderate' : '⏳ Weak'}
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <ScoreBar segments={[{ width: Math.min(100, Math.abs(legacyMetrics.breakoutScore) * 100), colour: 'bg-orange-500' }]} height={4} />
-                    <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
-                      <span>Breakout Mom.</span>
-                      <span className="text-zinc-300 font-mono">{legacyMetrics.breakoutScore.toFixed(1)}</span>
+
+                  {/* Exhaustion Alert Banner */}
+                  {legacyMetrics.exhaustion && (
+                    <div className="mt-3 p-3 rounded-lg bg-gradient-to-r from-orange-900/30 to-red-900/30 border border-orange-500/40">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg animate-pulse">⚠️</span>
+                          <div>
+                            <div className="text-xs font-bold text-orange-400">EXHAUSTION DETECTED</div>
+                            <div className="text-[10px] text-orange-300/70">Momentum signals fading</div>
+                          </div>
+                        </div>
+                        <div className="text-xs text-orange-300 font-mono bg-orange-900/50 px-2 py-1 rounded">
+                          CAUTION
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <ScoreBar segments={[{ width: Math.min(100, Math.abs(legacyMetrics.regimeWeight) * 100), colour: 'bg-cyan-500' }]} height={4} />
-                    <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
-                      <span>Regime Vol</span>
-                      <span className="text-zinc-300 font-mono">{legacyMetrics.regimeWeight.toFixed(1)}</span>
-                    </div>
-                  </div>
-                  <div>
-                    <ScoreBar segments={[{ width: Math.min(100, Math.abs(legacyMetrics.absorptionScore) * 100), colour: 'bg-yellow-400' }]} height={4} />
-                    <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
-                      <span>Absorption</span>
-                      <span className="text-zinc-300 font-mono">{legacyMetrics.absorptionScore.toFixed(1)}</span>
-                    </div>
-                  </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -318,23 +387,33 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
                 </div>
               )}
             </div>
-            {/* Absorption flag (simple indicator) */}
+            {/* Status Indicators */}
             <div className="border-t border-zinc-800 pt-4 mt-4">
-              <div className="flex justify-between items-center text-[10px]">
-                <span className="text-zinc-500">Absorption Detected</span>
-                {absorption && absorption > 0 ? (
-                  <span className="bg-yellow-900/40 text-yellow-400 px-2 py-0.5 rounded-full font-mono">YES</span>
-                ) : (
-                  <span className="bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded-full font-mono">NO</span>
-                )}
-              </div>
-              <div className="flex justify-between items-center text-[10px] mt-2">
-                <span className="text-zinc-500">Exhaustion Flag</span>
-                {legacyMetrics.exhaustion ? (
-                  <span className="bg-orange-900/40 text-orange-400 px-2 py-0.5 rounded-full font-mono animate-pulse">EXHAUSTED</span>
-                ) : (
-                  <span className="bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded-full font-mono">NORMAL</span>
-                )}
+              <div className="flex gap-3 items-center text-[10px]">
+                {/* Absorption */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-zinc-500">Absorption:</span>
+                  {absorption && absorption > 0 ? (
+                    <span className="bg-yellow-900/40 text-yellow-400 px-1.5 py-0.5 rounded font-mono text-[9px]">ACTIVE</span>
+                  ) : (
+                    <span className="text-zinc-600">-</span>
+                  )}
+                </div>
+                {/* Signal */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-zinc-500">Signal:</span>
+                  {legacyMetrics.tradeSignal === 1 ? (
+                    <span className="bg-green-900/40 text-green-400 px-1.5 py-0.5 rounded font-mono text-[9px]">LONG</span>
+                  ) : legacyMetrics.tradeSignal === -1 ? (
+                    <span className="bg-red-900/40 text-red-400 px-1.5 py-0.5 rounded font-mono text-[9px]">SHORT</span>
+                  ) : (
+                    <span className="text-zinc-600">-</span>
+                  )}
+                </div>
+                {/* State Badge */}
+                <div className="ml-auto">
+                  <Badge state={state} />
+                </div>
               </div>
             </div>
           </div>
