@@ -465,7 +465,6 @@ export class Orchestrator {
           type: 'MARKET',
           quantity: position.qty,
           reduceOnly: true,
-          positionSide: position.side,
           clientOrderId,
         }, { decisionId, orderAttemptId });
         this.expectedByOrderId.set(response.orderId, {
@@ -486,7 +485,6 @@ export class Orchestrator {
             type: 'MARKET',
             quantity: action.quantity,
             reduceOnly: false,
-            positionSide: action.side === 'BUY' ? 'LONG' : 'SHORT',
             clientOrderId,
           }, { decisionId, orderAttemptId });
 

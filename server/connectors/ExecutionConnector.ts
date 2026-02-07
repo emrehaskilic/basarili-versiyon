@@ -334,7 +334,11 @@ export class ExecutionConnector {
     }
 
     const qty = await this.normalizeQuantity(symbol, request.side, request.quantity);
-    const positionSide = this.resolvePositionSide(request);
+    const positionSide = this.resolvePositionSide(request, {
+      symbol,
+      orderAttemptId,
+      decisionId: context?.decisionId,
+    });
 
     const params: Record<string, string | number | boolean | undefined> = {
       symbol,
@@ -960,13 +964,30 @@ export class ExecutionConnector {
     this.emitStatus();
   }
 
-  private resolvePositionSide(request: PlaceOrderRequest): 'LONG' | 'SHORT' | 'BOTH' {
-    if (request.positionSide) {
-      return request.positionSide;
+  private resolvePositionSide(
+    request: PlaceOrderRequest,
+    context: { symbol: string; orderAttemptId: string; decisionId?: string }
+  ): 'LONG' | 'SHORT' | undefined {
+    if (!this.dualSidePosition) {
+      if (request.positionSide === 'LONG' || request.positionSide === 'SHORT') {
+        this.emitDebug({
+          channel: 'execution',
+          type: 'why_not_sent',
+          order_attempt_id: context.orderAttemptId,
+          decision_id: context.decisionId,
+          symbol: context.symbol,
+          ts: Date.now(),
+          payload: {
+            reason: 'one_way_mode_forces_both',
+            requested: request.positionSide,
+          },
+        });
+      }
+      return undefined;
     }
 
-    if (!this.dualSidePosition) {
-      return 'BOTH';
+    if (request.positionSide === 'LONG' || request.positionSide === 'SHORT') {
+      return request.positionSide;
     }
 
     return request.side === 'BUY' ? 'LONG' : 'SHORT';
