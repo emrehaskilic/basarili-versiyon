@@ -144,7 +144,9 @@ export interface DecisionRecord {
   invariant_violated: boolean;
   invariant_reason: string | null;
   data_gaps: string[];
-  initial_trading_balance: number;
+  starting_margin_usdt: number;
+  current_margin_budget_usdt: number;
+  ramp_mult: number;
   effective_leverage: number;
   unrealized_pnl_peak: number | null;
   profit_lock_activated: boolean;
@@ -162,7 +164,11 @@ export interface DecisionRecord {
 
 export interface OrchestratorConfig {
   gate: GateConfig;
-  initialTradingBalance: number;
+  startingMarginUsdt: number;
+  rampStepPct: number;
+  rampDecayPct: number;
+  rampMaxMult: number;
+  minMarginUsdt: number;
   maxLeverage: number;
   hardStopLossPct: number;
   liquidationEmergencyMarginRatio: number;

@@ -30,7 +30,9 @@ export interface SymbolActorDeps {
     invariantViolated: boolean;
     invariantReason: string | null;
     dataGaps: string[];
-    initialTradingBalance: number;
+    startingMarginUsdt: number;
+    currentMarginBudgetUsdt: number;
+    rampMult: number;
     effectiveLeverage: number;
     unrealizedPnlPeak: number | null;
     profitLockActivated: boolean;
@@ -40,8 +42,11 @@ export interface SymbolActorDeps {
   }) => void;
   onExecutionLogged: (event: ExecutionEvent | (ExecutionEvent & { slippage_bps?: number; execution_latency_ms?: number }), state: SymbolState) => void;
   getExpectedOrderMeta: (orderId: string) => { expectedPrice: number | null; sentAtMs: number; tag: 'entry' | 'add' | 'exit' } | null;
-  getInitialTradingBalance: () => number;
+  getStartingMarginUsdt: () => number;
+  getCurrentMarginBudgetUsdt: () => number;
+  getRampMult: () => number;
   getEffectiveLeverage: () => number;
+  onPositionClosed: (realizedPnl: number) => void;
   markAddUsed: () => void;
   cooldownConfig: { minMs: number; maxMs: number };
 }
@@ -51,6 +56,7 @@ export class SymbolActor {
   private processing = false;
   private lastDeltaZ = 0;
   private lastPrintsPerSecond = 0;
+  private pendingClosedTradeRealizedPnl = 0;
 
   readonly state: SymbolState;
 
@@ -173,7 +179,9 @@ export class SymbolActor {
       invariantViolated,
       invariantReason,
       dataGaps,
-      initialTradingBalance: this.deps.getInitialTradingBalance(),
+      startingMarginUsdt: this.deps.getStartingMarginUsdt(),
+      currentMarginBudgetUsdt: this.deps.getCurrentMarginBudgetUsdt(),
+      rampMult: this.deps.getRampMult(),
       effectiveLeverage: this.deps.getEffectiveLeverage(),
       unrealizedPnlPeak: this.state.position?.peakPnlPct ?? null,
       profitLockActivated: Boolean(this.state.position?.profitLockActivated),
@@ -237,6 +245,7 @@ export class SymbolActor {
     }
 
     if (event.type === 'TRADE_UPDATE') {
+      this.pendingClosedTradeRealizedPnl += event.realizedPnl;
       const expected = this.deps.getExpectedOrderMeta(event.orderId);
       let derivedLatencyMs: number | undefined;
       let derivedSlippageBps: number | undefined;
@@ -291,6 +300,8 @@ export class SymbolActor {
       }
 
       if (hadPosition && this.state.position === null) {
+        this.deps.onPositionClosed(this.pendingClosedTradeRealizedPnl);
+        this.pendingClosedTradeRealizedPnl = 0;
         this.state.last_exit_event_time_ms = event.event_time_ms;
         const cooldownMs = this.deps.decisionEngine.computeCooldownMs(
           this.lastDeltaZ,

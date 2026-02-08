@@ -5,6 +5,8 @@ import { SymbolActor } from './Actor';
 import { DecisionEngine } from './Decision';
 import { runGate } from './Gate';
 import { OrchestratorLogger } from './Logger';
+import { computeSizingFromBudget } from './SizingMath';
+import { SizingRamp } from './SizingRamp';
 import {
   DecisionAction,
   DecisionRecord,
@@ -24,9 +26,15 @@ export class Orchestrator {
   private readonly decisionLedger: DecisionRecord[] = [];
   private readonly executionSymbols = new Set<string>();
   private readonly realizedPnlBySymbol = new Map<string, number>();
+  private readonly sizingRamp: SizingRamp;
 
   private capitalSettings = {
-    initialTradingBalance: 100,
+    startingMarginUsdt: 25,
+    currentMarginBudgetUsdt: 25,
+    rampMult: 1,
+    rampStepPct: 10,
+    rampDecayPct: 20,
+    rampMaxMult: 5,
     leverage: 10,
   };
 
@@ -34,13 +42,27 @@ export class Orchestrator {
     private readonly connector: ExecutionConnector,
     private readonly config: OrchestratorConfig
   ) {
-    this.capitalSettings.initialTradingBalance = Math.max(0, config.initialTradingBalance);
+    this.capitalSettings.startingMarginUsdt = Math.max(0, config.startingMarginUsdt);
+    this.capitalSettings.rampStepPct = config.rampStepPct;
+    this.capitalSettings.rampDecayPct = config.rampDecayPct;
+    this.capitalSettings.rampMaxMult = config.rampMaxMult;
     this.capitalSettings.leverage = Math.min(this.connector.getPreferredLeverage(), config.maxLeverage);
     this.connector.setPreferredLeverage(this.capitalSettings.leverage);
+    this.sizingRamp = new SizingRamp({
+      startingMarginUsdt: this.capitalSettings.startingMarginUsdt,
+      minMarginUsdt: config.minMarginUsdt,
+      rampStepPct: config.rampStepPct,
+      rampDecayPct: config.rampDecayPct,
+      rampMaxMult: config.rampMaxMult,
+    });
+    this.capitalSettings.currentMarginBudgetUsdt = this.sizingRamp.getCurrentMarginBudgetUsdt();
+    this.capitalSettings.rampMult = this.capitalSettings.startingMarginUsdt > 0
+      ? this.capitalSettings.currentMarginBudgetUsdt / this.capitalSettings.startingMarginUsdt
+      : 0;
 
     this.decisionEngine = new DecisionEngine({
       expectedPrice: (symbol, side, type, limitPrice) => this.connector.expectedPrice(symbol, side, type, limitPrice),
-      getSizingBalance: (symbol, availableBalance) => this.resolveSizingBalance(symbol, availableBalance),
+      getCurrentMarginBudgetUsdt: (symbol) => this.getCurrentMarginBudgetUsdt(symbol),
       getMaxLeverage: () => this.capitalSettings.leverage,
       hardStopLossPct: this.config.hardStopLossPct,
       liquidationEmergencyMarginRatio: this.config.liquidationEmergencyMarginRatio,
@@ -281,10 +303,36 @@ export class Orchestrator {
     };
   }
 
-  async updateCapitalSettings(input: { initialTradingBalance?: number; leverage?: number }) {
-    if (typeof input.initialTradingBalance === 'number' && Number.isFinite(input.initialTradingBalance) && input.initialTradingBalance >= 0) {
-      this.capitalSettings.initialTradingBalance = input.initialTradingBalance;
+  async updateCapitalSettings(input: {
+    starting_margin_usdt?: number;
+    leverage?: number;
+    ramp_step_pct?: number;
+    ramp_decay_pct?: number;
+    ramp_max_mult?: number;
+  }) {
+    if (typeof input.starting_margin_usdt === 'number' && Number.isFinite(input.starting_margin_usdt) && input.starting_margin_usdt >= 0) {
+      this.capitalSettings.startingMarginUsdt = input.starting_margin_usdt;
     }
+    if (typeof input.ramp_step_pct === 'number' && Number.isFinite(input.ramp_step_pct) && input.ramp_step_pct > 0) {
+      this.capitalSettings.rampStepPct = input.ramp_step_pct;
+    }
+    if (typeof input.ramp_decay_pct === 'number' && Number.isFinite(input.ramp_decay_pct) && input.ramp_decay_pct > 0) {
+      this.capitalSettings.rampDecayPct = input.ramp_decay_pct;
+    }
+    if (typeof input.ramp_max_mult === 'number' && Number.isFinite(input.ramp_max_mult) && input.ramp_max_mult >= 1) {
+      this.capitalSettings.rampMaxMult = input.ramp_max_mult;
+    }
+    this.sizingRamp.updateConfig({
+      startingMarginUsdt: this.capitalSettings.startingMarginUsdt,
+      rampStepPct: this.capitalSettings.rampStepPct,
+      rampDecayPct: this.capitalSettings.rampDecayPct,
+      rampMaxMult: this.capitalSettings.rampMaxMult,
+      minMarginUsdt: this.config.minMarginUsdt,
+    });
+    this.capitalSettings.currentMarginBudgetUsdt = this.sizingRamp.getCurrentMarginBudgetUsdt();
+    this.capitalSettings.rampMult = this.capitalSettings.startingMarginUsdt > 0
+      ? this.capitalSettings.currentMarginBudgetUsdt / this.capitalSettings.startingMarginUsdt
+      : 0;
     if (typeof input.leverage === 'number' && Number.isFinite(input.leverage) && input.leverage > 0) {
       this.capitalSettings.leverage = Math.min(input.leverage, this.config.maxLeverage);
       this.connector.setPreferredLeverage(this.capitalSettings.leverage);
@@ -377,7 +425,9 @@ export class Orchestrator {
         invariantViolated,
         invariantReason,
         dataGaps,
-        initialTradingBalance,
+        startingMarginUsdt,
+        currentMarginBudgetUsdt,
+        rampMult,
         effectiveLeverage,
         unrealizedPnlPeak,
         profitLockActivated,
@@ -400,7 +450,9 @@ export class Orchestrator {
           invariant_violated: invariantViolated,
           invariant_reason: invariantReason,
           data_gaps: dataGaps,
-          initial_trading_balance: initialTradingBalance,
+          starting_margin_usdt: startingMarginUsdt,
+          current_margin_budget_usdt: currentMarginBudgetUsdt,
+          ramp_mult: rampMult,
           effective_leverage: effectiveLeverage,
           unrealized_pnl_peak: unrealizedPnlPeak,
           profit_lock_activated: profitLockActivated,
@@ -437,7 +489,9 @@ export class Orchestrator {
             position: state.position,
             execQuality: state.execQuality,
             marginRatio: state.marginRatio,
-            initial_trading_balance: this.capitalSettings.initialTradingBalance,
+            starting_margin_usdt: this.capitalSettings.startingMarginUsdt,
+            current_margin_budget_usdt: this.capitalSettings.currentMarginBudgetUsdt,
+            ramp_mult: this.capitalSettings.rampMult,
             effective_leverage: this.capitalSettings.leverage,
             unrealized_pnl_peak: state.position?.peakPnlPct ?? null,
             profit_lock_activated: state.position?.profitLockActivated ?? false,
@@ -446,8 +500,15 @@ export class Orchestrator {
         });
       },
       getExpectedOrderMeta: (orderId) => this.expectedByOrderId.get(orderId) || null,
-      getInitialTradingBalance: () => this.capitalSettings.initialTradingBalance,
+      getStartingMarginUsdt: () => this.capitalSettings.startingMarginUsdt,
+      getCurrentMarginBudgetUsdt: () => this.capitalSettings.currentMarginBudgetUsdt,
+      getRampMult: () => this.capitalSettings.rampMult,
       getEffectiveLeverage: () => this.capitalSettings.leverage,
+      onPositionClosed: (realizedPnl) => {
+        const next = this.sizingRamp.onTradeClosed(realizedPnl);
+        this.capitalSettings.currentMarginBudgetUsdt = next.currentMarginBudgetUsdt;
+        this.capitalSettings.rampMult = next.rampMult;
+      },
       markAddUsed: () => {
         // no-op
       },
@@ -535,6 +596,78 @@ export class Orchestrator {
       }
 
       if ((action.type === 'ENTRY_PROBE' || action.type === 'ADD_POSITION') && action.side && action.quantity && action.quantity > 0) {
+        const markPrice = this.connector.expectedPrice(symbol, action.side, 'MARKET');
+        if (!(typeof markPrice === 'number' && Number.isFinite(markPrice) && markPrice > 0)) {
+          this.logEntryBlocked(action, symbol, decisionId, orderAttemptId, 'unknown', null);
+          continue;
+        }
+
+        const rawQty = (this.capitalSettings.currentMarginBudgetUsdt * this.capitalSettings.leverage) / markPrice;
+        const preview = await this.connector.previewOrderSizing(symbol, action.side, rawQty, markPrice);
+        const computed = computeSizingFromBudget({
+          startingMarginUsdt: this.capitalSettings.startingMarginUsdt,
+          currentMarginBudgetUsdt: this.capitalSettings.currentMarginBudgetUsdt,
+          leverage: this.capitalSettings.leverage,
+          markPrice: preview.markPrice,
+          stepSize: preview.stepSize,
+          minNotionalUsdt: preview.minNotional,
+        });
+
+        const sizingPayload = {
+          ts: action.event_time_ms,
+          symbol,
+          sizing: {
+            starting_margin_usdt: this.capitalSettings.startingMarginUsdt,
+            current_margin_budget_usdt: this.capitalSettings.currentMarginBudgetUsdt,
+            ramp_mult: this.capitalSettings.rampMult,
+            leverage: this.capitalSettings.leverage,
+            mark_price: computed.markPrice,
+            notional_usdt: computed.notionalUsdt,
+            qty: computed.qty,
+            qty_rounded: computed.qtyRounded,
+            min_notional_ok: computed.minNotionalOk,
+          },
+          wallet: {
+            available_balance_usdt: actor.state.availableBalance,
+            margin_required_usdt: computed.marginRequiredUsdt,
+          },
+        };
+
+        if (computed.blockedReason === 'min_notional') {
+          this.logger.logExecution(action.event_time_ms, {
+            ...sizingPayload,
+            result: 'blocked',
+            blocked_reason: 'min_notional',
+            channel: 'execution',
+            type: 'ENTRY_BLOCK',
+            decision_id: decisionId,
+            order_attempt_id: orderAttemptId,
+          });
+          continue;
+        }
+
+        if (actor.state.availableBalance < computed.marginRequiredUsdt) {
+          this.logger.logExecution(action.event_time_ms, {
+            ...sizingPayload,
+            result: 'blocked',
+            blocked_reason: 'insufficient_margin',
+            channel: 'execution',
+            type: 'ENTRY_BLOCK',
+            decision_id: decisionId,
+            order_attempt_id: orderAttemptId,
+          });
+          continue;
+        }
+
+        this.logger.logExecution(action.event_time_ms, {
+          ...sizingPayload,
+          result: 'order_attempt',
+          channel: 'execution',
+          type: 'order_attempt',
+          decision_id: decisionId,
+          order_attempt_id: orderAttemptId,
+        });
+
         const tag = action.type === 'ENTRY_PROBE' ? 'entry' : 'add';
         const clientOrderId = this.clientOrderId(tag, symbol, action.event_time_ms);
 
@@ -543,7 +676,7 @@ export class Orchestrator {
             symbol,
             side: action.side,
             type: 'MARKET',
-            quantity: action.quantity,
+            quantity: computed.qtyRounded,
             reduceOnly: false,
             clientOrderId,
           },
@@ -563,11 +696,44 @@ export class Orchestrator {
     return `${tag}_${symbol}_${eventTimeMs}`.slice(0, 36);
   }
 
-  private resolveSizingBalance(symbol: string, availableBalance: number): number {
-    const base = Math.max(0, this.capitalSettings.initialTradingBalance);
-    const realized = Math.max(0, this.realizedPnlBySymbol.get(symbol) || 0);
-    const target = base + realized;
-    return Math.max(0, Math.min(availableBalance, target));
+  private getCurrentMarginBudgetUsdt(symbol: string): number {
+    return this.sizingRamp.getCurrentMarginBudgetUsdt();
+  }
+
+  private logEntryBlocked(
+    action: DecisionAction,
+    symbol: string,
+    decisionId: string,
+    orderAttemptId: string,
+    blockedReason: string,
+    detail: any
+  ) {
+    this.logger.logExecution(action.event_time_ms, {
+      ts: action.event_time_ms,
+      symbol,
+      sizing: {
+        starting_margin_usdt: this.capitalSettings.startingMarginUsdt,
+        current_margin_budget_usdt: this.capitalSettings.currentMarginBudgetUsdt,
+        ramp_mult: this.capitalSettings.rampMult,
+        leverage: this.capitalSettings.leverage,
+        mark_price: null,
+        notional_usdt: null,
+        qty: null,
+        qty_rounded: null,
+        min_notional_ok: null,
+      },
+      wallet: {
+        available_balance_usdt: this.getActor(symbol).state.availableBalance,
+        margin_required_usdt: null,
+      },
+      result: 'blocked',
+      blocked_reason: blockedReason,
+      detail,
+      channel: 'execution',
+      type: 'ENTRY_BLOCK',
+      decision_id: decisionId,
+      order_attempt_id: orderAttemptId,
+    });
   }
 }
 
@@ -599,7 +765,11 @@ export function createOrchestratorFromEnv(): Orchestrator {
         maxNetworkLatencyMs: Number(process.env.MAX_NETWORK_LATENCY_MS || 1500),
       },
     },
-    initialTradingBalance: Number(process.env.INITIAL_TRADING_BALANCE || 100),
+    startingMarginUsdt: Number(process.env.STARTING_MARGIN_USDT || 25),
+    rampStepPct: Number(process.env.RAMP_STEP_PCT || 10),
+    rampDecayPct: Number(process.env.RAMP_DECAY_PCT || 20),
+    rampMaxMult: Number(process.env.RAMP_MAX_MULT || 5),
+    minMarginUsdt: Number(process.env.MIN_MARGIN_USDT || 5),
     maxLeverage: Number(process.env.MAX_LEVERAGE || 100),
     hardStopLossPct: Number(process.env.HARD_STOP_LOSS_PCT || 1.0),
     liquidationEmergencyMarginRatio: Number(process.env.LIQUIDATION_EMERGENCY_MARGIN_RATIO || 0.30),

@@ -4,7 +4,7 @@ import { liquidationRiskTriggered } from './LiquidationGuard';
 
 export interface DecisionDependencies {
   expectedPrice: (symbol: string, side: 'BUY' | 'SELL', type: 'MARKET' | 'LIMIT', limitPrice?: number) => number | null;
-  getSizingBalance: (symbol: string, availableBalance: number) => number;
+  getCurrentMarginBudgetUsdt: (symbol: string) => number;
   getMaxLeverage: () => number;
   hardStopLossPct: number;
   liquidationEmergencyMarginRatio: number;
@@ -69,7 +69,6 @@ export class DecisionEngine {
           if (price && price > 0) {
             const probeQuantity = this.computeProbeQuantity({
               symbol,
-              availableBalance: state.availableBalance,
               expectedPrice: price,
               deltaZ,
               obiDeep,
@@ -133,7 +132,6 @@ export class DecisionEngine {
       if (price && price > 0) {
         const qty = this.computeProbeQuantity({
             symbol,
-            availableBalance: state.availableBalance,
             expectedPrice: price,
             deltaZ,
             obiDeep,
@@ -177,13 +175,12 @@ export class DecisionEngine {
 
   private computeProbeQuantity(input: {
     symbol: string;
-    availableBalance: number;
     expectedPrice: number;
     deltaZ: number;
     obiDeep: number;
     execPoor: boolean;
   }): number {
-    const sizingBalance = this.deps.getSizingBalance(input.symbol, input.availableBalance);
+    const sizingBalance = this.deps.getCurrentMarginBudgetUsdt(input.symbol);
     const leverage = this.deps.getMaxLeverage();
 
     const notional = sizingBalance * leverage;

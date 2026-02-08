@@ -31,6 +31,19 @@ interface SymbolRules {
   minNotional: number;
 }
 
+export interface OrderSizingPreview {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  stepSize: number;
+  minQty: number;
+  minNotional: number;
+  markPrice: number;
+  rawQty: number;
+  qtyRounded: number;
+  notionalUsdt: number;
+  minNotionalOk: boolean;
+}
+
 interface SignedRequestOptions {
   path: string;
   method: 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -192,6 +205,35 @@ export class ExecutionConnector {
 
   getQuote(symbol: string): TestnetQuote | null {
     return this.quotes.get(symbol.toUpperCase()) || null;
+  }
+
+  async previewOrderSizing(symbol: string, side: 'BUY' | 'SELL', rawQty: number, markPrice?: number | null): Promise<OrderSizingPreview> {
+    const normalizedSymbol = symbol.toUpperCase();
+    const rules = this.symbolRules.get(normalizedSymbol);
+    if (!rules) {
+      throw new Error(`missing_symbol_rules:${normalizedSymbol}`);
+    }
+
+    const resolvedMarkPrice = (typeof markPrice === 'number' && Number.isFinite(markPrice) && markPrice > 0)
+      ? markPrice
+      : await this.referencePrice(normalizedSymbol, side);
+
+    const step = rules.stepSize > 0 ? rules.stepSize : 0.001;
+    const qtyRounded = Math.floor(Math.max(0, rawQty) / step) * step;
+    const notionalUsdt = qtyRounded * resolvedMarkPrice;
+
+    return {
+      symbol: normalizedSymbol,
+      side,
+      stepSize: step,
+      minQty: rules.minQty,
+      minNotional: rules.minNotional,
+      markPrice: resolvedMarkPrice,
+      rawQty: Number(rawQty.toFixed(12)),
+      qtyRounded,
+      notionalUsdt,
+      minNotionalOk: rules.minNotional <= 0 ? true : notionalUsdt >= rules.minNotional,
+    };
   }
 
   async start() {
@@ -1084,11 +1126,12 @@ export class ExecutionConnector {
     const stepDigits = this.stepDigits(step);
 
     let qty = Math.floor(rawQty / step) * step;
-    if (qty < rules.minQty) {
-      qty = rules.minQty;
-    }
     if (Number.isFinite(rules.maxQty) && qty > rules.maxQty) {
       qty = rules.maxQty;
+    }
+
+    if (qty < rules.minQty) {
+      throw new Error(`min_qty:${rules.minQty}`);
     }
 
     if (rules.minNotional > 0) {
@@ -1096,8 +1139,7 @@ export class ExecutionConnector {
       if (marketPrice > 0) {
         const currentNotional = qty * marketPrice;
         if (currentNotional < rules.minNotional) {
-          const minQtyFromNotional = rules.minNotional / marketPrice;
-          qty = Math.ceil(minQtyFromNotional / step) * step;
+          throw new Error(`min_notional:${rules.minNotional}`);
         }
       }
     }

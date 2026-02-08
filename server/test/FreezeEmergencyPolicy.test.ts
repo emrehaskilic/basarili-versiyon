@@ -45,7 +45,7 @@ function baseState(): SymbolState {
 
 const engine = new DecisionEngine({
   expectedPrice: () => 100,
-  getSizingBalance: () => 100,
+  getCurrentMarginBudgetUsdt: () => 100,
   getMaxLeverage: () => 20,
   hardStopLossPct: 1.0,
   liquidationEmergencyMarginRatio: 0.30,

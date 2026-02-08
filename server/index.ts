@@ -1063,8 +1063,11 @@ app.post('/api/execution/symbol', async (req, res) => {
 
 app.post('/api/execution/settings', async (req, res) => {
     const settings = await orchestrator.updateCapitalSettings({
-        initialTradingBalance: Number(req.body?.initialTradingBalance),
+        starting_margin_usdt: Number(req.body?.starting_margin_usdt),
         leverage: Number(req.body?.leverage),
+        ramp_step_pct: Number(req.body?.ramp_step_pct),
+        ramp_decay_pct: Number(req.body?.ramp_decay_pct),
+        ramp_max_mult: Number(req.body?.ramp_max_mult),
     });
     res.json({ ok: true, settings, status: orchestrator.getExecutionStatus() });
 });

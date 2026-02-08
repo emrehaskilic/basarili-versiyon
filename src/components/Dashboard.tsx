@@ -17,7 +17,12 @@ interface ExecutionStatus {
   selectedSymbol?: string | null; // Legacy
   selectedSymbols: string[]; // New
   settings: {
-    initialTradingBalance: number;
+    startingMarginUsdt: number;
+    currentMarginBudgetUsdt: number;
+    rampMult: number;
+    rampStepPct: number;
+    rampDecayPct: number;
+    rampMaxMult: number;
     leverage: number;
   };
   wallet: {
@@ -52,7 +57,12 @@ const defaultExecutionStatus: ExecutionStatus = {
   selectedSymbol: null,
   selectedSymbols: [],
   settings: {
-    initialTradingBalance: 100,
+    startingMarginUsdt: 25,
+    currentMarginBudgetUsdt: 25,
+    rampMult: 1,
+    rampStepPct: 10,
+    rampDecayPct: 20,
+    rampMaxMult: 5,
     leverage: 10,
   },
   wallet: {
@@ -80,7 +90,7 @@ export const Dashboard: React.FC = () => {
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   // Settings inputs - initialize with defaults, only update from server on first load/explicit sync
-  const [initialBalanceInput, setInitialBalanceInput] = useState<string>('100');
+  const [startingMarginInput, setStartingMarginInput] = useState<string>('25');
   const [leverageInput, setLeverageInput] = useState<string>('10');
   const settingsLoadedRef = React.useRef(false);
 
@@ -121,7 +131,7 @@ export const Dashboard: React.FC = () => {
 
         // Sync local settings only if not yet loaded (prevents overwrite while typing)
         if (!settingsLoadedRef.current && data.settings) {
-          setInitialBalanceInput(String(data.settings.initialTradingBalance));
+          setStartingMarginInput(String(data.settings.startingMarginUsdt));
           setLeverageInput(String(data.settings.leverage));
           settingsLoadedRef.current = true;
 
@@ -277,8 +287,11 @@ export const Dashboard: React.FC = () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        initialTradingBalance: Number(initialBalanceInput) || 100,
-        leverage: Number(leverageInput) || 1
+        starting_margin_usdt: Number(startingMarginInput) || 25,
+        leverage: Number(leverageInput) || 1,
+        ramp_step_pct: executionStatus.settings.rampStepPct || 10,
+        ramp_decay_pct: executionStatus.settings.rampDecayPct || 20,
+        ramp_max_mult: executionStatus.settings.rampMaxMult || 5,
       }),
     });
     const data = await res.json();
@@ -286,7 +299,7 @@ export const Dashboard: React.FC = () => {
       setExecutionStatus(data.status as ExecutionStatus);
       // Update inputs to reflect any server-side clamping/validation results
       if (data.settings) {
-        setInitialBalanceInput(String(data.settings.initialTradingBalance));
+        setStartingMarginInput(String(data.settings.startingMarginUsdt));
         setLeverageInput(String(data.settings.leverage));
       }
     }
@@ -430,11 +443,11 @@ export const Dashboard: React.FC = () => {
 
           <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
             <h2 className="text-sm font-semibold text-zinc-300">Risk & Capital</h2>
-            <label className="text-xs text-zinc-400 block">Initial Trading Balance (USDT)</label>
+            <label className="text-xs text-zinc-400 block">Starting Margin (USDT)</label>
             <input
               type="number"
-              value={initialBalanceInput}
-              onChange={(e) => setInitialBalanceInput(e.target.value)}
+              value={startingMarginInput}
+              onChange={(e) => setStartingMarginInput(e.target.value)}
               className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
             />
             <label className="text-xs text-zinc-400 block">Leverage (no hard cap, env MAX_LEVERAGE applies)</label>
@@ -446,6 +459,16 @@ export const Dashboard: React.FC = () => {
               className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
             />
             <button onClick={saveSettings} className="w-full px-3 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-xs font-semibold">Apply Settings</button>
+            <div className="rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-300">
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Current Margin Budget</span>
+                <span className="font-mono">{formatNum(executionStatus.settings.currentMarginBudgetUsdt)} USDT</span>
+              </div>
+              <div className="mt-1 flex justify-between">
+                <span className="text-zinc-500">Ramp Mult</span>
+                <span className="font-mono">{formatNum(executionStatus.settings.rampMult, 2)}x</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -461,7 +484,8 @@ export const Dashboard: React.FC = () => {
               </button>
             </div>
             <div className="grid grid-cols-2 gap-y-2 text-xs">
-              <div className="text-zinc-500">Initial Trading Balance</div><div className="text-right font-mono">{formatNum(executionStatus.settings.initialTradingBalance)} USDT</div>
+              <div className="text-zinc-500">Starting Margin</div><div className="text-right font-mono">{formatNum(executionStatus.settings.startingMarginUsdt)} USDT</div>
+              <div className="text-zinc-500">Current Margin Budget</div><div className="text-right font-mono">{formatNum(executionStatus.settings.currentMarginBudgetUsdt)} USDT</div>
               <div className="text-zinc-500">Total Wallet</div><div className="text-right font-mono">{formatNum(executionStatus.wallet.totalWalletUsdt)} USDT</div>
               <div className="text-zinc-500">Available</div><div className="text-right font-mono">{formatNum(executionStatus.wallet.availableBalanceUsdt)} USDT</div>
               <div className="text-zinc-500">Realized PnL</div><div className={`text-right font-mono ${executionStatus.wallet.realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatNum(executionStatus.wallet.realizedPnl)}</div>
