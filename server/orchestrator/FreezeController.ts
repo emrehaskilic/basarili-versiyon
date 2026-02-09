@@ -7,7 +7,7 @@ export interface FreezeAssessment {
 
 export function assessFreezeFromExecQuality(quality: ExecQualityLevel): FreezeAssessment {
   if (quality === 'UNKNOWN') {
-    return { freezeActive: true, reason: 'exec_quality_unknown' };
+    return { freezeActive: false, reason: 'exec_quality_unknown' };
   }
   if (quality === 'BAD') {
     return { freezeActive: true, reason: 'exec_quality_bad' };
