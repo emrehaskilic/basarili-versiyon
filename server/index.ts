@@ -165,7 +165,7 @@ const EXCHANGE_INFO_TTL_MS = 1000 * 60 * 60; // 1 hr
 
 // Global Rate Limit
 let globalBackoffUntil = 0; // Starts at 0 to allow fresh attempts on restart
-let symbolConcurrencyLimit = Math.max(AUTO_SCALE_MIN_SYMBOLS, Number(process.env.SYMBOL_CONCURRENCY || 1));
+let symbolConcurrencyLimit = Math.max(AUTO_SCALE_MIN_SYMBOLS, Number(process.env.SYMBOL_CONCURRENCY || 10));
 let autoScaleLastUpTs = 0;
 
 // =============================================================================
