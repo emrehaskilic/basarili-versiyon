@@ -21,6 +21,8 @@ export interface OpenInterestMetrics {
   source: 'real' | 'mock';
 }
 
+type OpenInterestListener = (metrics: OpenInterestMetrics) => void;
+
 export class OpenInterestMonitor {
   private symbol: string;
   private currentOI = 0;
@@ -28,6 +30,7 @@ export class OpenInterestMonitor {
   private oiHistory: Array<{ value: number; timestamp: number }> = [];
   private lastFetchTime = 0;
   private readonly FETCH_INTERVAL_MS = 60_000;  // Update every 60 seconds
+  private readonly listeners: Set<OpenInterestListener> = new Set();
 
   constructor(symbol: string) {
     this.symbol = symbol;
@@ -67,6 +70,8 @@ export class OpenInterestMonitor {
         if (this.oiHistory.length > 60) {
           this.oiHistory.shift();
         }
+
+        this.emitUpdate('real');
       }
 
       this.lastFetchTime = now;
@@ -79,6 +84,33 @@ export class OpenInterestMonitor {
    * Calculate OI metrics
    */
   public getMetrics(): OpenInterestMetrics {
+    return this.buildMetrics('real');
+  }
+
+  /**
+   * Test-friendly manual update API.
+   * Mirrors FundingMonitor's update() + onUpdate() pattern.
+   */
+  public update(openInterest: number): void {
+    if (!Number.isFinite(openInterest) || openInterest < 0) {
+      return;
+    }
+    const now = Date.now();
+    this.previousOI = this.currentOI > 0 ? this.currentOI : openInterest;
+    this.currentOI = openInterest;
+    this.oiHistory.push({ value: this.currentOI, timestamp: now });
+    if (this.oiHistory.length > 60) {
+      this.oiHistory.shift();
+    }
+    this.lastFetchTime = now;
+    this.emitUpdate('mock');
+  }
+
+  public onUpdate(listener: OpenInterestListener): void {
+    this.listeners.add(listener);
+  }
+
+  private buildMetrics(source: 'real' | 'mock'): OpenInterestMetrics {
     const delta = this.currentOI - this.previousOI;
     const deltaPercent = this.previousOI > 0
       ? (delta / this.previousOI) * 100
@@ -113,8 +145,16 @@ export class OpenInterestMonitor {
       volatility,
       strength,
       lastUpdate: Date.now(),
-      source: 'real',
+      source,
     };
+  }
+
+  private emitUpdate(source: 'real' | 'mock'): void {
+    if (this.listeners.size === 0) {
+      return;
+    }
+    const metrics = this.buildMetrics(source);
+    this.listeners.forEach((listener) => listener(metrics));
   }
 
   /**

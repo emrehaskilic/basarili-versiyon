@@ -3,8 +3,7 @@ function assert(condition: any, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-import { createOrderbookState, applySnapshot, applyDepthUpdate } from '../metrics/OrderbookManager';
-import { DepthCache } from '../index';
+import { createOrderbookState, applySnapshot, applyDepthUpdate, DepthCache } from '../metrics/OrderbookManager';
 
 export function runTests() {
   const ob = createOrderbookState();
@@ -12,18 +11,38 @@ export function runTests() {
     lastUpdateId: 10,
     bids: [],
     asks: [],
-    cachedAt: Date.now(),
   };
   applySnapshot(ob, snapshot);
   // PASS case: U <= lastUpdateId+1 <= u
-  const ok = applyDepthUpdate(ob, { U: 11, u: 15, b: [], a: [] });
-  assert(ok === true, 'contiguous update should pass when U <= lastUpdateId+1 <= u');
+  const ok = applyDepthUpdate(ob, {
+    U: 11,
+    u: 15,
+    b: [],
+    a: [],
+    eventTimeMs: Date.now(),
+    receiptTimeMs: Date.now(),
+  });
+  assert(ok.ok === true && ok.applied === true, 'contiguous update should pass when U <= lastUpdateId+1 <= u');
   // FAIL case: U > lastUpdateId+1
   ob.lastUpdateId = 20;
-  const bad1 = applyDepthUpdate(ob, { U: 22, u: 25, b: [], a: [] });
-  assert(bad1 === false, 'update with U > lastUpdateId+1 should fail');
-  // FAIL case: u <= lastUpdateId
+  const bad1 = applyDepthUpdate(ob, {
+    U: 22,
+    u: 25,
+    b: [],
+    a: [],
+    eventTimeMs: Date.now(),
+    receiptTimeMs: Date.now(),
+  });
+  assert(bad1.ok === false && bad1.gapDetected === true, 'update with U > lastUpdateId+1 should fail');
+  // DROP case: u <= lastUpdateId
   ob.lastUpdateId = 30;
-  const bad2 = applyDepthUpdate(ob, { U: 28, u: 30, b: [], a: [] });
-  assert(bad2 === false, 'update with u <= lastUpdateId should fail');
+  const bad2 = applyDepthUpdate(ob, {
+    U: 28,
+    u: 30,
+    b: [],
+    a: [],
+    eventTimeMs: Date.now(),
+    receiptTimeMs: Date.now(),
+  });
+  assert(bad2.ok === true && bad2.dropped === true, 'update with u <= lastUpdateId should be dropped');
 }

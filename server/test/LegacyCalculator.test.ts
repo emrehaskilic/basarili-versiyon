@@ -17,18 +17,18 @@ export function runTests() {
   ob.asks.set(102, 3);
   const legacy = new LegacyCalculator();
   const metrics = legacy.computeMetrics(ob);
-  // Weighted OBI and deep OBI should be identical for this tiny book
-  const expectedObi = (10 + 5) - (7 + 3); // 15 - 10 = 5
-  assert(metrics.obiWeighted === expectedObi, 'OBI weighted should equal sum(bids) - sum(asks)');
-  assert(metrics.obiDeep === expectedObi, 'OBI deep should equal weighted for small depth');
+  // Weighted OBI and deep OBI are normalized to [-1, +1]
+  const expectedObi = ((10 + 5) - (7 + 3)) / ((10 + 5) + (7 + 3)); // 5 / 25 = 0.2
+  assert(Math.abs(metrics.obiWeighted - expectedObi) < 1e-9, 'OBI weighted should be normalized');
+  assert(Math.abs(metrics.obiDeep - expectedObi) < 1e-9, 'OBI deep should equal weighted for small depth');
   assert(metrics.obiDivergence === 0, 'OBI divergence should be zero when weighted and deep are equal');
 
   // Prepare trades for delta windows, VWAP and CVD session tests
   const now = Date.now();
-  // Add three trades: buy 2 at t-500ms, sell 1 at t-400ms, buy 3 at t-4000ms
+  // Add trades in chronological order
+  legacy.addTrade({ price: 99, quantity: 3, side: 'buy', timestamp: now - 4000 });
   legacy.addTrade({ price: 100, quantity: 2, side: 'buy', timestamp: now - 500 });
   legacy.addTrade({ price: 101, quantity: 1, side: 'sell', timestamp: now - 400 });
-  legacy.addTrade({ price: 99, quantity: 3, side: 'buy', timestamp: now - 4000 });
 
   // Override Date.now temporarily for deterministic windows
   const originalNow = Date.now;

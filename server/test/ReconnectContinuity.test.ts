@@ -5,8 +5,7 @@ function assert(condition: any, message: string): void {
 
 import { TimeAndSales } from '../metrics/TimeAndSales';
 import { CvdCalculator } from '../metrics/CvdCalculator';
-import { createOrderbookState, applySnapshot, applyDepthUpdate } from '../metrics/OrderbookManager';
-import { DepthCache } from '../index';
+import { createOrderbookState, applySnapshot, applyDepthUpdate, DepthCache } from '../metrics/OrderbookManager';
 
 export function runTests() {
   const symbol = 'XYZ';
@@ -23,13 +22,20 @@ export function runTests() {
   assert(c1.cvd === 1, 'initial CVD');
   // Simulate orderbook snapshot and gap update (disconnect)
   const ob = createOrderbookState();
-  const snap: DepthCache = { lastUpdateId: 10, bids: [], asks: [], cachedAt: now };
+  const snap: DepthCache = { lastUpdateId: 10, bids: [], asks: [] };
   applySnapshot(ob, snap);
   // Apply an out-of-sequence update to simulate gap
-  const gap = applyDepthUpdate(ob, { U: 15, u: 20, b: [], a: [] });
-  assert(gap === false, 'gap update should fail');
+  const gap = applyDepthUpdate(ob, {
+    U: 15,
+    u: 20,
+    b: [],
+    a: [],
+    eventTimeMs: Date.now(),
+    receiptTimeMs: Date.now(),
+  });
+  assert(gap.ok === false, 'gap update should fail');
   // After reconnect (new snapshot)
-  const snap2: DepthCache = { lastUpdateId: 30, bids: [], asks: [], cachedAt: now + 1000 };
+  const snap2: DepthCache = { lastUpdateId: 30, bids: [], asks: [] };
   applySnapshot(ob, snap2);
   // Aggregators should still report original values
   m1 = tas.computeMetrics();
