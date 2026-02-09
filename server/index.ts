@@ -435,6 +435,18 @@ function updateStreams() {
     const limitedSymbols = requiredSorted.slice(0, Math.max(AUTO_SCALE_MIN_SYMBOLS, symbolConcurrencyLimit));
     const effective = new Set<string>(limitedSymbols);
 
+    // Debug Log
+    if (requiredSorted.length > 0) {
+        log('AUTO_SCALE_DEBUG', {
+            requestedCount: requiredSorted.length,
+            requested: requiredSorted,
+            activeLimit: symbolConcurrencyLimit,
+            limitCalculated: Math.max(AUTO_SCALE_MIN_SYMBOLS, symbolConcurrencyLimit),
+            kept: limitedSymbols,
+            dropped: requiredSorted.slice(limitedSymbols.length),
+        });
+    }
+
     if (requiredSorted.length > limitedSymbols.length) {
         log('AUTO_SCALE_APPLIED', {
             requested: requiredSorted.length,
@@ -474,11 +486,16 @@ function updateStreams() {
     ws.on('open', () => {
         wsState = 'connected';
         log('WS_OPEN', {});
+
+        let delay = 0;
         activeSymbols.forEach((symbol) => {
             const ob = getOrderbook(symbol);
             if (ob.uiState === 'INIT' || ob.lastUpdateId === 0) {
                 transitionOrderbookState(symbol, 'SNAPSHOT_PENDING', 'ws_open_seed');
-                fetchSnapshot(symbol, 'ws_open_seed', true).catch(() => { });
+                setTimeout(() => {
+                    fetchSnapshot(symbol, 'ws_open_seed', true).catch(() => { });
+                }, delay);
+                delay += 1000;
             }
         });
     });
@@ -493,6 +510,9 @@ function updateStreams() {
 
     ws.on('error', (e) => log('WS_ERROR', { msg: e.message }));
 }
+
+
+
 
 function enqueueDepthUpdate(symbol: string, update: { U: number; u: number; b: [string, string][]; a: [string, string][]; eventTimeMs: number; receiptTimeMs: number }) {
     const meta = getMeta(symbol);
