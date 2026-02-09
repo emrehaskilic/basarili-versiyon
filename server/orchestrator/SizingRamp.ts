@@ -70,6 +70,14 @@ export class SizingRamp {
     return this.getState();
   }
 
+  forceBudget(amount: number) {
+    this.state.currentMarginBudgetUsdt = this.clamp(amount);
+    // Recalculate rampMult based on new budget
+    this.state.rampMult = this.config.startingMarginUsdt > 0
+      ? this.state.currentMarginBudgetUsdt / this.config.startingMarginUsdt
+      : 0;
+  }
+
   private clamp(value: number): number {
     const { min, max } = computeRampBounds(this.config);
     return Math.max(min, Math.min(max, value));

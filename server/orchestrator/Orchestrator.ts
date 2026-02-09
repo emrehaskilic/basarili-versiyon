@@ -322,17 +322,40 @@ export class Orchestrator {
     if (typeof input.ramp_max_mult === 'number' && Number.isFinite(input.ramp_max_mult) && input.ramp_max_mult >= 1) {
       this.capitalSettings.rampMaxMult = input.ramp_max_mult;
     }
-    this.sizingRamp.updateConfig({
-      startingMarginUsdt: this.capitalSettings.startingMarginUsdt,
-      rampStepPct: this.capitalSettings.rampStepPct,
-      rampDecayPct: this.capitalSettings.rampDecayPct,
-      rampMaxMult: this.capitalSettings.rampMaxMult,
-      minMarginUsdt: this.config.minMarginUsdt,
-    });
+    const status = this.getExecutionStatus();
+    if (this.connector.isConnected() && status.wallet.totalWalletUsdt > 0) {
+      const wallet = status.wallet.totalWalletUsdt;
+      const start = this.capitalSettings.startingMarginUsdt;
+
+      // If wallet exceeds max budget allowed by rampMaxMult, increase maxMult automatically
+      if (start > 0) {
+        const requiredMult = Math.ceil(wallet / start);
+        if (requiredMult > this.capitalSettings.rampMaxMult) {
+          this.capitalSettings.rampMaxMult = requiredMult;
+        }
+      }
+
+      this.sizingRamp.updateConfig({
+        startingMarginUsdt: this.capitalSettings.startingMarginUsdt,
+        rampStepPct: this.capitalSettings.rampStepPct,
+        rampDecayPct: this.capitalSettings.rampDecayPct,
+        rampMaxMult: this.capitalSettings.rampMaxMult,
+        minMarginUsdt: this.config.minMarginUsdt,
+      });
+
+      this.sizingRamp.forceBudget(wallet);
+    } else {
+      this.sizingRamp.updateConfig({
+        startingMarginUsdt: this.capitalSettings.startingMarginUsdt,
+        rampStepPct: this.capitalSettings.rampStepPct,
+        rampDecayPct: this.capitalSettings.rampDecayPct,
+        rampMaxMult: this.capitalSettings.rampMaxMult,
+        minMarginUsdt: this.config.minMarginUsdt,
+      });
+    }
+
     this.capitalSettings.currentMarginBudgetUsdt = this.sizingRamp.getCurrentMarginBudgetUsdt();
-    this.capitalSettings.rampMult = this.capitalSettings.startingMarginUsdt > 0
-      ? this.capitalSettings.currentMarginBudgetUsdt / this.capitalSettings.startingMarginUsdt
-      : 0;
+    this.capitalSettings.rampMult = this.sizingRamp.getState().rampMult;
     if (typeof input.leverage === 'number' && Number.isFinite(input.leverage) && input.leverage > 0) {
       this.capitalSettings.leverage = Math.min(input.leverage, this.config.maxLeverage);
       this.connector.setPreferredLeverage(this.capitalSettings.leverage);
