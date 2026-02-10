@@ -16,9 +16,6 @@ import { createServer } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import cors from 'cors';
 
-// Polyfills
-declare var process: any;
-declare var Buffer: any;
 
 // Metrics Imports
 import { TimeAndSales } from './metrics/TimeAndSales';
@@ -500,7 +497,7 @@ function updateStreams() {
         });
     });
 
-    ws.on('message', (raw: Buffer) => handleMsg(raw));
+    ws.on('message', (raw: any) => handleMsg(raw));
 
     ws.on('close', () => {
         wsState = 'disconnected';
@@ -573,7 +570,6 @@ async function processDepthQueue(symbol: string) {
             }
 
             evaluateLiveReadiness(symbol);
-            emitBlockedReasonTelemetry(symbol);
 
             const tas = getTaS(symbol);
             const cvd = getCvd(symbol);
@@ -633,78 +629,6 @@ function evaluateLiveReadiness(symbol: string) {
     }
 }
 
-
-function emitBlockedReasonTelemetry(symbol: string) {
-    const meta = getMeta(symbol);
-    const now = Date.now();
-    if (now - meta.lastBlockedTelemetryTs < BLOCKED_TELEMETRY_INTERVAL_MS) {
-        return;
-    }
-    meta.lastBlockedTelemetryTs = now;
-
-    const ob = getOrderbook(symbol);
-    const executionStatus: any = orchestrator.getExecutionStatus();
-    const connectorState = executionStatus?.connection || {};
-    const actorState = (orchestrator.getStateSnapshot() || {})[symbol];
-    const execQuality = actorState?.execQuality?.quality || 'UNKNOWN';
-    const execMetricsPresent = Boolean(actorState?.execQuality?.metricsPresent);
-    const freezeActive = Boolean(actorState?.execQuality?.freezeActive);
-    const legacy = getLegacy(symbol);
-    const maybeMetrics = legacy.computeMetrics(ob);
-
-    const metricsAvailability = {
-        obi: typeof maybeMetrics?.obiDeep === 'number' && Number.isFinite(maybeMetrics.obiDeep),
-        cvd: typeof maybeMetrics?.cvdSlope === 'number' && Number.isFinite(maybeMetrics.cvdSlope),
-        deltaZ: typeof maybeMetrics?.deltaZ === 'number' && Number.isFinite(maybeMetrics.deltaZ),
-    };
-
-    const desyncRate10s = countWindow(meta.desyncEvents, 10000, now);
-    const snapshotSkipRate10s = countWindow(meta.snapshotSkipEvents, 10000, now);
-    const lastSnapshotOkMsAgo = meta.lastSnapshotOk > 0 ? now - meta.lastSnapshotOk : null;
-
-    const dataIntegrityUnstable =
-        ob.uiState !== 'LIVE' ||
-        desyncRate10s > LIVE_DESYNC_RATE_10S_MAX ||
-        meta.depthQueue.length > LIVE_QUEUE_MAX;
-
-    let blockedReason: string | null = null;
-    if (ob.uiState !== 'LIVE') blockedReason = 'orderbook_not_live';
-    else if (!metricsAvailability.obi || !metricsAvailability.cvd || !metricsAvailability.deltaZ) blockedReason = 'metrics_missing';
-    else if (dataIntegrityUnstable) blockedReason = 'data_integrity_unstable';
-    else if (!connectorState?.executionEnabled) blockedReason = 'execution_disabled';
-    else if (!connectorState?.hasCredentials) blockedReason = 'missing_credentials';
-    else if (freezeActive) blockedReason = 'freeze_active';
-    else blockedReason = null;
-
-    log('BLOCKED_REASON', {
-        symbol,
-        ts: now,
-        state: { orderbook_state: ob.uiState, ws_state: wsState },
-        data_integrity: {
-            live: ob.uiState === 'LIVE',
-            desync_rate_10s: desyncRate10s,
-            snapshot_skip_rate_10s: snapshotSkipRate10s,
-            last_snapshot_ok_ms_ago: lastSnapshotOkMsAgo,
-            queue_len: meta.depthQueue.length,
-        },
-        metrics_availability: metricsAvailability,
-        gate: {
-            can_decide: blockedReason === null,
-            blocked_reason: blockedReason || null,
-        },
-        execution: {
-            enabled: Boolean(connectorState?.executionEnabled),
-            hasCredentials: Boolean(connectorState?.hasCredentials),
-            ready: Boolean(connectorState?.ready),
-        },
-        freeze: {
-            active: freezeActive,
-            exec_quality: execQuality,
-            exec_metrics_present: execMetricsPresent,
-        },
-    });
-}
-
 function runAutoScaler() {
     const symbols = Array.from(activeSymbols);
     if (symbols.length === 0) {
@@ -740,7 +664,7 @@ function runAutoScaler() {
     autoScaleLastUpTs = 0;
 }
 
-function handleMsg(raw: Buffer) {
+function handleMsg(raw: any) {
     let msg: any;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (!msg.data) return;
@@ -791,7 +715,6 @@ function handleMsg(raw: Buffer) {
 
         // Broadcast
         broadcastMetrics(s, ob, tas, cvd, absVal, leg, t);
-        emitBlockedReasonTelemetry(s);
     }
 }
 
@@ -840,9 +763,9 @@ function broadcastMetrics(
         state: ob.uiState,
         timeAndSales: tasMetrics,
         cvd: {
-            tf1m: cvdM.find(x => x.timeframe === '1m') || { cvd: 0, delta: 0, exhaustion: false },
-            tf5m: cvdM.find(x => x.timeframe === '5m') || { cvd: 0, delta: 0, exhaustion: false },
-            tf15m: cvdM.find(x => x.timeframe === '15m') || { cvd: 0, delta: 0, exhaustion: false },
+            tf1m: cvdM.find(x => x.timeframe === '1m') || { cvd: 0, delta: 0 },
+            tf5m: cvdM.find(x => x.timeframe === '5m') || { cvd: 0, delta: 0 },
+            tf15m: cvdM.find(x => x.timeframe === '15m') || { cvd: 0, delta: 0 },
             tradeCounts: cvd.getTradeCounts() // Debug: trade counts per timeframe
         },
         absorption: absVal,
@@ -1107,11 +1030,7 @@ app.post('/api/execution/symbol', async (req, res) => {
 
 app.post('/api/execution/settings', async (req, res) => {
     const settings = await orchestrator.updateCapitalSettings({
-        starting_margin_usdt: Number(req.body?.starting_margin_usdt),
         leverage: Number(req.body?.leverage),
-        ramp_step_pct: Number(req.body?.ramp_step_pct),
-        ramp_decay_pct: Number(req.body?.ramp_decay_pct),
-        ramp_max_mult: Number(req.body?.ramp_max_mult),
     });
     res.json({ ok: true, settings, status: orchestrator.getExecutionStatus() });
 });
@@ -1174,7 +1093,6 @@ setInterval(() => {
 setInterval(() => {
     activeSymbols.forEach((symbol) => {
         evaluateLiveReadiness(symbol);
-        emitBlockedReasonTelemetry(symbol);
     });
     // runAutoScaler();
 }, 1000);

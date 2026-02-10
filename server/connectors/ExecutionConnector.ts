@@ -111,6 +111,8 @@ export class ExecutionConnector {
   private dualSidePosition: boolean | null = null;
   private exchangeInfoLoaded = false;
   private preferredLeverage: number;
+  private walletBalance = 0;
+  private availableBalance = 0;
 
   constructor(config: ExecutionConnectorConfig) {
     this.config = config;
@@ -177,11 +179,39 @@ export class ExecutionConnector {
     return this.preferredLeverage;
   }
 
+  getWalletBalance(): number {
+    return this.walletBalance;
+  }
+
+  getAvailableBalance(): number {
+    return this.availableBalance;
+  }
+
   setCredentials(apiKey: string, apiSecret: string) {
     this.apiKey = apiKey;
     this.apiSecret = apiSecret;
     this.lastError = null;
     this.emitStatus();
+  }
+
+  setEnabled(enabled: boolean) {
+    this.executionEnabled = enabled;
+    this.emitStatus();
+  }
+
+  async fetchExchangeInfo(): Promise<string[]> {
+    try {
+      const res = await fetch(`${this.config.restBaseUrl}/fapi/v1/exchangeInfo`);
+      if (!res.ok) throw new Error(`Status ${res.status}`);
+      const data: any = await res.json();
+      return data.symbols
+        .filter((s: any) => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT')
+        .map((s: any) => s.symbol)
+        .sort();
+    } catch (e: any) {
+      this.lastError = `Exchange info fetch failed: ${e.message}`;
+      return [];
+    }
   }
 
   ensureSymbol(symbol: string) {
@@ -518,8 +548,8 @@ export class ExecutionConnector {
       ? balances.find((b: any) => b.asset === 'USDT')
       : null;
 
-    const availableBalance = Number(usdtBalance?.availableBalance || 0);
-    const walletBalance = Number(usdtBalance?.balance || 0);
+    this.availableBalance = Number(usdtBalance?.availableBalance || 0);
+    this.walletBalance = Number(usdtBalance?.balance || 0);
 
     const bySymbol = new Map<string, any>();
     if (Array.isArray(positions)) {
@@ -534,8 +564,8 @@ export class ExecutionConnector {
         type: 'ACCOUNT_UPDATE',
         symbol,
         event_time_ms: now,
-        availableBalance,
-        walletBalance,
+        availableBalance: this.availableBalance,
+        walletBalance: this.walletBalance,
         positionAmt: Number(p?.positionAmt || 0),
         entryPrice: Number(p?.entryPrice || 0),
         unrealizedPnL: Number(p?.unRealizedProfit || 0),
@@ -717,8 +747,8 @@ export class ExecutionConnector {
         ? message.a.B.find((x: any) => x.a === 'USDT')
         : null;
 
-      const availableBalance = Number(balance?.cw || 0);
-      const walletBalance = Number(balance?.wb || 0);
+      this.availableBalance = Number(balance?.cw || 0);
+      this.walletBalance = Number(balance?.wb || 0);
       const eventTime = Number(message.E || 0);
 
       const positions = Array.isArray(message.a.P) ? message.a.P : [];
@@ -731,8 +761,8 @@ export class ExecutionConnector {
           type: 'ACCOUNT_UPDATE',
           symbol,
           event_time_ms: eventTime,
-          availableBalance,
-          walletBalance,
+          availableBalance: this.availableBalance,
+          walletBalance: this.walletBalance,
           positionAmt: Number(p.pa || 0),
           entryPrice: Number(p.ep || 0),
           unrealizedPnL: Number(p.up || 0),

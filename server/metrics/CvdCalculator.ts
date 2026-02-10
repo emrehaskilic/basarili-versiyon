@@ -17,24 +17,8 @@ import { AggressiveSide, TradeEvent } from './TimeAndSales';
 
 export interface CvdMetrics {
   timeframe: string;
-  /**
-   * Cumulative volume delta (sum of buyQty minus sellQty) over the
-   * timeframe.  Positive values indicate net buying pressure.
-   */
   cvd: number;
-  /**
-   * Net delta within the window (identical to `cvd` as we do not
-   * normalise by window size).  Provided for clarity.
-   */
   delta: number;
-  /**
-   * Exhaustion flag.  Set to true when delta continues to rise (for
-   * buys) or fall (for sells) but the last trade price has not
-   * exceeded the extremum seen within the window.  This is a simple
-   * implementation; consumers are free to ignore it or implement more
-   * sophisticated logic.
-   */
-  exhaustion: boolean;
 }
 
 interface StoredCvdTrade extends TradeEvent {
@@ -108,30 +92,11 @@ export class CvdCalculator {
     for (const [tf, _ms] of this.windows.entries()) {
       const arr = this.trades.get(tf)!;
       let cvd = 0;
-      let maxPrice = -Infinity;
-      let minPrice = Infinity;
-      let lastPrice = NaN;
       for (const t of arr) {
         cvd += t.quantity;
-        if (t.price > maxPrice) maxPrice = t.price;
-        if (t.price < minPrice) minPrice = t.price;
-        lastPrice = t.price;
       }
       const delta = cvd;
-      let exhaustion = false;
-      if (arr.length > 0) {
-        // If delta is positive (buying pressure) but last price has not
-        // surpassed the maximum within the window, we flag exhaustion.
-        if (delta > 0 && lastPrice < maxPrice) {
-          exhaustion = true;
-        }
-        // Conversely, if delta is negative (selling pressure) but last
-        // price has not breached the minimum, flag exhaustion.
-        if (delta < 0 && lastPrice > minPrice) {
-          exhaustion = true;
-        }
-      }
-      results.push({ timeframe: tf, cvd, delta, exhaustion });
+      results.push({ timeframe: tf, cvd, delta });
     }
     return results;
   }

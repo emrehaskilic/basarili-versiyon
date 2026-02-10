@@ -88,8 +88,8 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
     <div className="border-b border-zinc-800/50 hover:bg-zinc-900/30 transition-colors">
       {/* Main Row - Fixed Height & Width */}
       <div
-        className="grid gap-0 px-4 items-center cursor-pointer select-none h-14"
-        style={{ gridTemplateColumns: '120px 100px 110px 90px 90px 100px 80px 90px' }}
+        className="grid gap-0 px-5 items-center cursor-pointer select-none h-14"
+        style={{ gridTemplateColumns: 'minmax(140px, 1fr) 120px 140px 100px 100px 100px' }}
         onClick={() => setExpanded(!expanded)}
       >
         {/* Symbol */}
@@ -100,7 +100,7 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
             </svg>
           </button>
           <span className="font-bold text-white text-sm truncate">{symbol}</span>
-          <span className="text-[8px] px-1 py-0.5 bg-zinc-800 text-zinc-500 rounded flex-shrink-0">PERP</span>
+          <span className="text-[8px] px-1 py-0.5 bg-zinc-800 text-zinc-500 rounded flex-shrink-0 uppercase tracking-tighter">PERP</span>
         </div>
 
         {/* Price */}
@@ -108,15 +108,16 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
           {legacyMetrics.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
         </div>
 
-        {/* OI (New) */}
+        {/* OI / Change */}
         <div className="flex flex-col items-end justify-center pr-2">
           {openInterest ? (
             <>
-              <span className="font-mono text-xs text-zinc-300 font-bold">{(openInterest.openInterest / 1_000_000).toFixed(2)}M</span>
-              <div className="flex items-center gap-1 text-[10px]">
-                <span className={openInterest.delta > 0 ? 'text-green-400' : openInterest.delta < 0 ? 'text-red-400' : 'text-zinc-500'}>
-                  {openInterest.delta > 0 ? '+' : ''}{(openInterest.delta / 1000).toFixed(0)}k
+              <span className="font-mono text-xs text-white font-bold">{(openInterest.openInterest / 1_000_000).toFixed(2)}M</span>
+              <div className="flex items-center gap-1 text-[9px] font-mono tracking-tighter">
+                <span className={openInterest.oiChangeAbs >= 0 ? 'text-green-500' : 'text-red-500'}>
+                  {openInterest.oiChangeAbs >= 0 ? '+' : ''}{(openInterest.oiChangeAbs / 1000).toFixed(1)}k
                 </span>
+                <span className="text-zinc-600">({openInterest.oiChangePct.toFixed(2)}%)</span>
               </div>
             </>
           ) : (
@@ -124,7 +125,7 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
           )}
         </div>
 
-        {/* OBI (W) */}
+        {/* OBI (10L) */}
         <div className="text-center">
           <MetricValue value={legacyMetrics.obiWeighted} />
         </div>
@@ -139,22 +140,6 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
           <SlopeIcon value={legacyMetrics.cvdSlope} />
           <MetricValue value={legacyMetrics.cvdSlope} />
         </div>
-
-        {/* Signal */}
-        <div className="flex justify-center">
-          {legacyMetrics.tradeSignal === 1 ? (
-            <span className="text-green-400 font-bold text-[10px] bg-green-900/40 px-1.5 py-0.5 rounded border border-green-800">LONG</span>
-          ) : legacyMetrics.tradeSignal === -1 ? (
-            <span className="text-red-400 font-bold text-[10px] bg-red-900/40 px-1.5 py-0.5 rounded border border-red-800">SHORT</span>
-          ) : (
-            <span className="text-zinc-600 text-xs">—</span>
-          )}
-        </div>
-
-        {/* Status */}
-        <div className="flex justify-end">
-          <Badge state={state} />
-        </div>
       </div>
 
       {/* Expanded Content */}
@@ -162,51 +147,6 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
         <div className="bg-zinc-950/30 border-t border-zinc-800 p-6 animate-in fade-in slide-in-from-top-2 duration-200">
           <div className="space-y-8">
 
-            {/* 1. Advanced Metrics Grid */}
-            <div className="space-y-3">
-              <h3 className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-2">
-                <span className="w-1 h-1 bg-zinc-500 rounded-full"></span>
-                Advanced Metrics
-              </h3>
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                <MetricCard
-                  title="Sweep / Fade"
-                  value={legacyMetrics.sweepFadeScore}
-                  showBar
-                  min={-100}
-                  max={100}
-                  suffix="%"
-                  status={Math.abs(legacyMetrics.sweepFadeScore) > 25 ? (legacyMetrics.sweepFadeScore > 0 ? 'positive' : 'negative') : 'neutral'}
-                />
-                <MetricCard
-                  title="Breakout Score"
-                  value={legacyMetrics.breakoutScore}
-                  showBar
-                  min={0}
-                  max={100}
-                  suffix="/100"
-                  status={legacyMetrics.breakoutScore > 60 ? 'warning' : 'neutral'}
-                />
-                <MetricCard
-                  title="Volatility Index"
-                  value={legacyMetrics.regimeWeight * 100}
-                  showBar
-                  min={0}
-                  max={100}
-                  suffix="%"
-                  status={legacyMetrics.regimeWeight > 0.6 ? 'warning' : 'neutral'}
-                />
-                <MetricCard
-                  title="Absorption"
-                  value={legacyMetrics.absorptionScore}
-                  showBar
-                  min={0}
-                  max={100}
-                  suffix="%"
-                  status={legacyMetrics.absorptionScore > 50 ? 'highlight' : 'neutral'}
-                />
-              </div>
-            </div>
 
             {/* 2. Trade Analysis & CVD */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -320,18 +260,6 @@ const SymbolRow: React.FC<SymbolRowProps> = ({ symbol, data, showLatency = false
               <OpenInterestSection metrics={data.openInterest} />
             )}
 
-            {/* 4. Exhaustion Alert */}
-            {legacyMetrics.exhaustion && (
-              <div className="p-3 bg-gradient-to-r from-purple-900/40 via-purple-900/10 to-transparent border-l-4 border-purple-500 text-purple-200 text-xs flex items-center gap-3 rounded animate-pulse">
-                <div className="bg-purple-500/20 p-1 rounded-full">
-                  <svg className="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
-                </div>
-                <div>
-                  <span className="font-bold block tracking-wide text-purple-300">MARKET EXHAUSTION SIGNAL</span>
-                  <span className="text-purple-300/70">Orderflow imbalance detected. Reversal or fierce consolidation likely.</span>
-                </div>
-              </div>
-            )}
           </div>
         </div>
       )}

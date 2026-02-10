@@ -12,7 +12,6 @@
 export interface CvdTfMetrics {
   cvd: number;
   delta: number;
-  exhaustion: boolean;
 }
 
 /**
@@ -23,8 +22,6 @@ export interface CvdTfMetrics {
  */
 export interface LegacyMetrics {
   price: number;
-  high24h?: number;
-  low24h?: number;
   obiWeighted: number;
   obiDeep: number;
   obiDivergence: number;
@@ -36,13 +33,7 @@ export interface LegacyMetrics {
   vwap: number;
   totalVolume: number;
   totalNotional: number;
-  absorptionScore: number;
-  sweepFadeScore: number;
-  breakoutScore: number;
-  regimeWeight: number;
   tradeCount: number;
-  tradeSignal?: number; // 1=Buy, -1=Sell, 0=Neutral
-  exhaustion?: boolean; // True = market exhaustion detected
 }
 
 /**
@@ -72,13 +63,10 @@ export interface TimeAndSalesMetrics {
  */
 export interface OpenInterestMetrics {
   openInterest: number;
-  delta: number;
-  deltaPercent: number;
-  trend: 'up' | 'down' | 'flat';
-  signal: 'bullish' | 'bearish' | 'neutral';
-  volatility: number;
-  strength: number;
-  lastUpdate: number;
+  oiChangeAbs: number;
+  oiChangePct: number;
+  oiDeltaWindow: number;
+  lastUpdated: number;
   source: 'real' | 'mock';
 }
 

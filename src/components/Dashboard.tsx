@@ -14,15 +14,8 @@ interface ExecutionStatus {
     symbols: string[];
     lastError: string | null;
   };
-  selectedSymbol?: string | null; // Legacy
-  selectedSymbols: string[]; // New
+  selectedSymbols: string[];
   settings: {
-    startingMarginUsdt: number;
-    currentMarginBudgetUsdt: number;
-    rampMult: number;
-    rampStepPct: number;
-    rampDecayPct: number;
-    rampMaxMult: number;
     leverage: number;
   };
   wallet: {
@@ -31,19 +24,8 @@ interface ExecutionStatus {
     realizedPnl: number;
     unrealizedPnl: number;
     totalPnl: number;
+    lastUpdated: number;
   };
-  openPosition: {
-    side: 'LONG' | 'SHORT';
-    size: number;
-    entryPrice: number;
-    leverage: number;
-  } | null;
-  openPositions?: Record<string, {
-    side: 'LONG' | 'SHORT';
-    size: number;
-    entryPrice: number;
-    leverage: number;
-  }>;
 }
 
 const defaultExecutionStatus: ExecutionStatus = {
@@ -54,15 +36,8 @@ const defaultExecutionStatus: ExecutionStatus = {
     symbols: [],
     lastError: null,
   },
-  selectedSymbol: null,
   selectedSymbols: [],
   settings: {
-    startingMarginUsdt: 25,
-    currentMarginBudgetUsdt: 25,
-    rampMult: 1,
-    rampStepPct: 10,
-    rampDecayPct: 20,
-    rampMaxMult: 5,
     leverage: 10,
   },
   wallet: {
@@ -71,9 +46,8 @@ const defaultExecutionStatus: ExecutionStatus = {
     realizedPnl: 0,
     unrealizedPnl: 0,
     totalPnl: 0,
+    lastUpdated: 0,
   },
-  openPosition: null,
-  openPositions: {},
 };
 
 const formatNum = (n: number, d = 2) => n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -88,11 +62,6 @@ export const Dashboard: React.FC = () => {
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
   const [connectionError, setConnectionError] = useState<string | null>(null);
-
-  // Settings inputs - initialize with defaults, only update from server on first load/explicit sync
-  const [startingMarginInput, setStartingMarginInput] = useState<string>('25');
-  const [leverageInput, setLeverageInput] = useState<string>('10');
-  const settingsLoadedRef = React.useRef(false);
 
   const [executionStatus, setExecutionStatus] = useState<ExecutionStatus>(defaultExecutionStatus);
 
@@ -129,22 +98,12 @@ export const Dashboard: React.FC = () => {
         const data = (await res.json()) as ExecutionStatus;
         setExecutionStatus(data);
 
-        // Sync local settings only if not yet loaded (prevents overwrite while typing)
-        if (!settingsLoadedRef.current && data.settings) {
-          setStartingMarginInput(String(data.settings.startingMarginUsdt));
-          setLeverageInput(String(data.settings.leverage));
-          settingsLoadedRef.current = true;
-
-          // Also sync selected symbols if server has them
-          if (data.selectedSymbols && data.selectedSymbols.length > 0) {
-            // Merge with local? Or overwrite locally?
-            // Overwrite locally since server is source of truth on load
-            const serverSyms = data.selectedSymbols.filter(s => s && s.length > 0);
-            if (serverSyms.length > 0) {
-              setSelectedPairs(serverSyms);
-            }
-          } else if (data.selectedSymbol) {
-            setSelectedPairs([data.selectedSymbol]);
+        // Sync selected symbols if server has them
+        if (data.selectedSymbols && data.selectedSymbols.length > 0) {
+          const serverSyms = data.selectedSymbols.filter(s => s && s.length > 0);
+          if (serverSyms.length > 0) {
+            // Only update if current list is empty to prevent feedback loops?
+            // Actually, usually server should follow UI here.
           }
         }
       } catch {
@@ -169,7 +128,6 @@ export const Dashboard: React.FC = () => {
         // ignore and retry on next change
       }
     };
-    // Debounce slightly to avoid spamming while selecting multiple?
     const timer = setTimeout(syncSelectedSymbols, 500);
     return () => clearTimeout(timer);
   }, [proxyUrl, selectedPairs]);
@@ -181,60 +139,6 @@ export const Dashboard: React.FC = () => {
       setSelectedPairs(selectedPairs.filter(p => p !== pair));
     } else {
       setSelectedPairs([...selectedPairs, pair]);
-    }
-  };
-
-  const startExecution = async () => {
-    setConnectionError(null);
-    try {
-      // 1. Connect
-      if (executionStatus.connection.state !== 'CONNECTED') {
-        const res = await fetch(`${proxyUrl}/api/execution/connect`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiKey, apiSecret }),
-        });
-        if (!res.ok) {
-          const d = await res.json();
-          throw new Error(d.error || 'connect_failed');
-        }
-      }
-
-      // 2. Enable
-      const res2 = await fetch(`${proxyUrl}/api/execution/enabled`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: true }),
-      });
-      const data = await res2.json();
-      if (res2.ok) {
-        setExecutionStatus(data.status);
-      } else {
-        throw new Error(data.error || 'enable_failed');
-      }
-    } catch (e: any) {
-      setConnectionError(e.message || 'start_failed');
-    }
-  };
-
-  const killSwitch = async () => {
-    setConnectionError(null);
-    try {
-      // 1. Disable
-      await fetch(`${proxyUrl}/api/execution/enabled`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: false }),
-      });
-
-      // 2. Disconnect (triggers cancel all)
-      const res = await fetch(`${proxyUrl}/api/execution/disconnect`, {
-        method: 'POST'
-      });
-      const data = await res.json();
-      setExecutionStatus(data.status);
-    } catch (e: any) {
-      setConnectionError(e.message || 'kill_failed');
     }
   };
 
@@ -270,41 +174,6 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  const toggleExecution = async (enabled: boolean) => {
-    const res = await fetch(`${proxyUrl}/api/execution/enabled`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      setExecutionStatus(data.status as ExecutionStatus);
-    }
-  };
-
-  const saveSettings = async () => {
-    const res = await fetch(`${proxyUrl}/api/execution/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        starting_margin_usdt: Number(startingMarginInput) || 25,
-        leverage: Number(leverageInput) || 1,
-        ramp_step_pct: executionStatus.settings.rampStepPct || 10,
-        ramp_decay_pct: executionStatus.settings.rampDecayPct || 20,
-        ramp_max_mult: executionStatus.settings.rampMaxMult || 5,
-      }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      setExecutionStatus(data.status as ExecutionStatus);
-      // Update inputs to reflect any server-side clamping/validation results
-      if (data.settings) {
-        setStartingMarginInput(String(data.settings.startingMarginUsdt));
-        setLeverageInput(String(data.settings.leverage));
-      }
-    }
-  };
-
   const refreshWalletPnl = async () => {
     const res = await fetch(`${proxyUrl}/api/execution/refresh`, {
       method: 'POST',
@@ -327,229 +196,148 @@ export const Dashboard: React.FC = () => {
       <div className="max-w-7xl mx-auto space-y-6">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-white tracking-tight">Orderflow Matrix</h1>
-            <p className="text-zinc-500 text-sm mt-1">DATA: MAINNET | EXECUTION: TESTNET</p>
+            <h1 className="text-2xl font-bold text-white tracking-tight">Orderflow Telemetry</h1>
+            <p className="text-zinc-500 text-sm mt-1">DATA: MAINNET | EXCHANGE: TESTNET</p>
           </div>
           <div className="text-xs rounded border border-zinc-700 px-3 py-2 bg-zinc-900">
-            {executionStatus.connection.executionEnabled ? (
-              <span className="text-green-400">Execution ON</span>
-            ) : (
-              <span className="text-amber-300">Execution OFF (orders blocked)</span>
-            )}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
-            <h2 className="text-sm font-semibold text-zinc-300">API & Execution</h2>
-            <input
-              type="password"
-              placeholder="Testnet API Key"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
-            />
-            <input
-              type="password"
-              placeholder="Testnet API Secret"
-              value={apiSecret}
-              onChange={(e) => setApiSecret(e.target.value)}
-              className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
-            />
-
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={startExecution}
-                className="px-3 py-3 bg-green-600 hover:bg-green-500 rounded text-sm font-bold text-white shadow-lg shadow-green-900/20 transition-all active:scale-95"
-                disabled={executionStatus.connection.executionEnabled}
-              >
-                START EXECUTION
-              </button>
-              <button
-                onClick={killSwitch}
-                className="px-3 py-3 bg-red-600 hover:bg-red-500 rounded text-sm font-bold text-white shadow-lg shadow-red-900/20 transition-all active:scale-95 animate-pulse"
-              >
-                KILL SWITCH
-              </button>
-            </div>
-
-            <div className="flex gap-2 opacity-50 text-xs">
-              <button onClick={connectTestnet} className="hover:underline">Manual Connect</button>
-              <button onClick={disconnectTestnet} className="hover:underline">Manual Disconnect</button>
-            </div>
-
-            <div className="text-xs">
-              Status: <span className={statusColor} title={executionStatus.connection.lastError || ''}>{executionStatus.connection.state}</span>
-            </div>
-            {connectionError && <div className="text-xs text-red-400">{connectionError}</div>}
-            <label className="flex items-center justify-between text-xs pt-2 border-t border-zinc-800">
-              <span>Execution Enabled</span>
-              <input
-                type="checkbox"
-                checked={executionStatus.connection.executionEnabled}
-                onChange={(e) => toggleExecution(e.target.checked)}
-                className="accent-green-500"
-              />
-            </label>
-          </div>
-
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
-            <h2 className="text-sm font-semibold text-zinc-300">Pair Selection (Multi)</h2>
-            <p className="text-[11px] text-zinc-500">Pair list source: TESTNET futures exchangeInfo. Data stream: MAINNET metrics.</p>
-            <button
-              onClick={() => setDropdownOpen((v) => !v)}
-              className="w-full flex items-center justify-between bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-sm"
-            >
-              <span>{isLoadingPairs ? 'Loading...' : `${selectedPairs.length} pairs selected`}</span>
-              <span>▾</span>
-            </button>
-
-            <div className="flex flex-wrap gap-1 mt-2 mb-2">
-              {selectedPairs.map(p => (
-                <span key={p} className="text-xs px-2 py-1 bg-blue-900/30 text-blue-300 rounded flex items-center gap-1 border border-blue-900/50">
-                  {p}
-                  <button onClick={() => togglePair(p)} className="hover:text-white">×</button>
-                </span>
-              ))}
-            </div>
-
-            {isDropdownOpen && !isLoadingPairs && (
-              <div className="border border-zinc-800 rounded bg-zinc-950 p-2 space-y-2">
-                <input
-                  type="text"
-                  placeholder="Search pair"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full bg-black border border-zinc-800 rounded px-2 py-1 text-xs"
-                />
-                <div className="max-h-56 overflow-y-auto space-y-1">
-                  {filteredPairs.map((pair) => {
-                    const isSelected = selectedPairs.includes(pair);
-                    return (
-                      <button
-                        key={pair}
-                        onClick={() => togglePair(pair)}
-                        className={`w-full text-left px-2 py-1 rounded text-xs flex justify-between ${isSelected ? 'bg-blue-900/40 text-blue-300' : 'hover:bg-zinc-800 text-zinc-400'}`}
-                      >
-                        <span>{pair}</span>
-                        {isSelected && <span>✓</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
-            <h2 className="text-sm font-semibold text-zinc-300">Risk & Capital</h2>
-            <label className="text-xs text-zinc-400 block">Starting Margin (USDT)</label>
-            <input
-              type="number"
-              value={startingMarginInput}
-              onChange={(e) => setStartingMarginInput(e.target.value)}
-              className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
-            />
-            <label className="text-xs text-zinc-400 block">Leverage (no hard cap, env MAX_LEVERAGE applies)</label>
-            <input
-              type="number"
-              min={1}
-              value={leverageInput}
-              onChange={(e) => setLeverageInput(e.target.value)}
-              className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
-            />
-            <button onClick={saveSettings} className="w-full px-3 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-xs font-semibold">Apply Settings</button>
-            <div className="rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-300">
-              <div className="flex justify-between">
-                <span className="text-zinc-500">Current Margin Budget</span>
-                <span className="font-mono">{formatNum(executionStatus.settings.currentMarginBudgetUsdt)} USDT</span>
-              </div>
-              <div className="mt-1 flex justify-between">
-                <span className="text-zinc-500">Ramp Mult</span>
-                <span className="font-mono">{formatNum(executionStatus.settings.rampMult, 2)}x</span>
-              </div>
-            </div>
+            <span className={statusColor}>{executionStatus.connection.state}</span>
           </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-zinc-300">Wallet & PnL (Testnet Execution Events)</h2>
-              <button
-                onClick={refreshWalletPnl}
-                className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
-              >
-                Refresh
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-y-2 text-xs">
-              <div className="text-zinc-500">Starting Margin</div><div className="text-right font-mono">{formatNum(executionStatus.settings.startingMarginUsdt)} USDT</div>
-              <div className="text-zinc-500">Current Margin Budget</div><div className="text-right font-mono">{formatNum(executionStatus.settings.currentMarginBudgetUsdt)} USDT</div>
-              <div className="text-zinc-500">Total Wallet</div><div className="text-right font-mono">{formatNum(executionStatus.wallet.totalWalletUsdt)} USDT</div>
-              <div className="text-zinc-500">Available</div><div className="text-right font-mono">{formatNum(executionStatus.wallet.availableBalanceUsdt)} USDT</div>
-              <div className="text-zinc-500">Realized PnL</div><div className={`text-right font-mono ${executionStatus.wallet.realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatNum(executionStatus.wallet.realizedPnl)}</div>
-              <div className="text-zinc-500">Unrealized PnL</div><div className={`text-right font-mono ${executionStatus.wallet.unrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatNum(executionStatus.wallet.unrealizedPnl)}</div>
-              <div className="text-zinc-500">Total PnL</div><div className={`text-right font-mono ${executionStatus.wallet.totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatNum(executionStatus.wallet.totalPnl)}</div>
-            </div>
-          </div>
+          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
+            <h2 className="text-sm font-semibold text-zinc-300 text-center border-b border-zinc-800 pb-2">WALLET & PNL</h2>
+            <div className="grid grid-cols-2 gap-y-3 text-sm py-2">
+              <div className="text-zinc-500">Total Wallet</div>
+              <div className="text-right font-mono text-white text-lg">{formatNum(executionStatus.wallet.totalWalletUsdt)} USDT</div>
 
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
-            <h2 className="text-sm font-semibold text-zinc-300 mb-2">Open Position</h2>
-            {executionStatus.openPosition ? (
-              <div className="grid grid-cols-2 gap-y-2 text-xs">
-                <div className="text-zinc-500">Side</div><div className="text-right font-mono">{executionStatus.openPosition.side}</div>
-                <div className="text-zinc-500">Size</div><div className="text-right font-mono">{formatNum(executionStatus.openPosition.size, 6)}</div>
-                <div className="text-zinc-500">Entry Price</div><div className="text-right font-mono">{formatNum(executionStatus.openPosition.entryPrice)}</div>
-                <div className="text-zinc-500">Leverage</div><div className="text-right font-mono">{formatNum(executionStatus.openPosition.leverage, 1)}x</div>
+              <div className="text-zinc-500">Available</div>
+              <div className="text-right font-mono">{formatNum(executionStatus.wallet.availableBalanceUsdt)} USDT</div>
+
+              <div className="text-zinc-500">Realized PnL</div>
+              <div className={`text-right font-mono ${executionStatus.wallet.realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {executionStatus.wallet.realizedPnl >= 0 ? '+' : ''}{formatNum(executionStatus.wallet.realizedPnl)}
               </div>
-            ) : (
-              <div className="text-xs text-zinc-500">No open position</div>
+
+              <div className="text-zinc-500">Unrealized PnL</div>
+              <div className={`text-right font-mono ${executionStatus.wallet.unrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {executionStatus.wallet.unrealizedPnl >= 0 ? '+' : ''}{formatNum(executionStatus.wallet.unrealizedPnl)}
+              </div>
+
+              <div className="text-zinc-500 font-bold border-t border-zinc-800 pt-2">Total PnL</div>
+              <div className={`text-right font-mono font-bold border-t border-zinc-800 pt-2 ${executionStatus.wallet.totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {executionStatus.wallet.totalPnl >= 0 ? '+' : ''}{formatNum(executionStatus.wallet.totalPnl)}
+              </div>
+            </div>
+
+            <button
+              onClick={refreshWalletPnl}
+              className="w-full mt-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-xs font-semibold text-zinc-300 border border-zinc-700 transition-colors"
+            >
+              REFRESH WALLET
+            </button>
+            {executionStatus.wallet.lastUpdated > 0 && (
+              <p className="text-[10px] text-zinc-600 text-center">Last synced: {new Date(executionStatus.wallet.lastUpdated).toLocaleTimeString()}</p>
             )}
           </div>
+
+          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
+            <h2 className="text-sm font-semibold text-zinc-300">Credentials & Symbols</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <input
+                type="password"
+                placeholder="Testnet API Key"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
+              />
+              <input
+                type="password"
+                placeholder="Testnet API Secret"
+                value={apiSecret}
+                onChange={(e) => setApiSecret(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-2 text-sm"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={connectTestnet} className="px-3 py-2 bg-blue-700 hover:bg-blue-600 rounded text-xs font-bold text-white shadow-lg transition-all active:scale-95">CONNECT EXCHANGE</button>
+              <button onClick={disconnectTestnet} className="px-3 py-2 bg-zinc-700 hover:bg-zinc-600 rounded text-xs font-bold text-white transition-all active:scale-95">DISCONNECT</button>
+            </div>
+            {connectionError && <div className="text-xs text-red-500 font-medium italic">{connectionError}</div>}
+
+            <div className="pt-2 border-t border-zinc-800">
+              <button
+                onClick={() => setDropdownOpen((v) => !v)}
+                className="w-full flex items-center justify-between bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-sm"
+              >
+                <span>{isLoadingPairs ? 'Loading Symbols...' : `${selectedPairs.length} symbols active`}</span>
+                <span>▾</span>
+              </button>
+              <div className="flex flex-wrap gap-1 mt-2">
+                {selectedPairs.map(p => (
+                  <span key={p} className="text-[10px] px-2 py-1 bg-zinc-800 text-zinc-400 rounded-full border border-zinc-700 flex items-center gap-1">
+                    {p}
+                    <button onClick={() => togglePair(p)} className="hover:text-white transition-colors">×</button>
+                  </span>
+                ))}
+              </div>
+              {isDropdownOpen && !isLoadingPairs && (
+                <div className="absolute z-10 mt-1 w-[300px] border border-zinc-700 rounded bg-[#18181b] p-2 shadow-2xl">
+                  <input
+                    type="text"
+                    placeholder="Filter symbols..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full bg-black border border-zinc-800 rounded px-2 py-1 text-xs mb-2"
+                  />
+                  <div className="max-h-56 overflow-y-auto space-y-1">
+                    {filteredPairs.map((pair) => (
+                      <button
+                        key={pair}
+                        onClick={() => togglePair(pair)}
+                        className={`w-full text-left px-2 py-1 rounded text-xs flex justify-between ${selectedPairs.includes(pair) ? 'bg-zinc-700 text-white' : 'hover:bg-zinc-800 text-zinc-500'}`}
+                      >
+                        <span>{pair}</span>
+                        {selectedPairs.includes(pair) && <span>✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
-        <div className="md:hidden space-y-3 mb-4">
-          {activeSymbols.map((symbol) => {
-            const msg: MetricsMessage | undefined = marketData[symbol];
-            if (!msg) return <div key={symbol} className="p-3 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-500 text-xs animate-pulse">Waiting for data: {symbol}...</div>;
-            return <MobileSymbolCard key={symbol} symbol={symbol} metrics={msg} showLatency={false} />;
-          })}
-        </div>
-
-        <div className="hidden md:block border border-zinc-800 rounded-xl overflow-hidden bg-zinc-900/80">
+        <div className="border border-zinc-800 rounded-xl overflow-hidden bg-zinc-900/80 shadow-2xl">
           <div className="overflow-x-auto">
             <div className="min-w-[900px]">
-              <div className="grid gap-0 px-4 py-3 text-xs font-bold text-zinc-400 uppercase tracking-wider bg-zinc-900/80 border-b border-zinc-700" style={{ gridTemplateColumns: '120px 100px 110px 90px 90px 100px 80px 90px' }}>
+              <div className="grid gap-0 px-5 py-4 text-[11px] font-bold text-zinc-500 uppercase tracking-widest bg-zinc-900 border-b border-zinc-800" style={{ gridTemplateColumns: 'minmax(140px, 1fr) 120px 140px 100px 100px 100px' }}>
                 <div>Symbol</div>
-                <div className="text-right font-mono">Price</div>
-                <div className="text-right font-mono">OI / Δ</div>
-                <div className="text-center">OBI (W)</div>
-                <div className="text-center">Δ Z-Score</div>
+                <div className="text-right">Price</div>
+                <div className="text-right">OI / Change</div>
+                <div className="text-center">OBI (10L)</div>
+                <div className="text-center">Delta Z</div>
                 <div className="text-center">CVD Slope</div>
-                <div className="text-center">Signal</div>
-                <div className="text-right">Status</div>
               </div>
-              <div className="bg-black/20 divide-y divide-zinc-800/50">
+              <div className="bg-black/20 divide-y divide-zinc-900">
                 {activeSymbols.map((symbol) => {
                   const msg: MetricsMessage | undefined = marketData[symbol];
                   if (!msg) return (
-                    <div key={symbol} className="grid px-4 py-3 text-xs text-zinc-500 bg-zinc-900/40 border-b border-zinc-800 animate-pulse" style={{ gridTemplateColumns: '120px 1fr' }}>
-                      <div className="font-bold">{symbol}</div>
-                      <div>Initializing...</div>
+                    <div key={symbol} className="px-5 py-4 text-xs text-zinc-600 italic">
+                      Initializing {symbol}...
                     </div>
                   );
                   return <SymbolRow key={symbol} symbol={symbol} data={msg} showLatency={false} />;
                 })}
-                {Object.keys(marketData).length === 0 && (
-                  <div className="p-12 text-center text-zinc-500 animate-pulse">Connecting to MAINNET market data...</div>
-                )}
               </div>
             </div>
           </div>
         </div>
 
-        <div className="text-xs text-zinc-600 text-center">Market data source is always MAINNET. Execution route is always TESTNET.</div>
+        <div className="text-[10px] text-zinc-700 text-center uppercase tracking-tighter">
+          Orderflow Matrix Protocol • Mainnet Telemetry Hub • Testnet Bridge Active
+        </div>
       </div>
     </div>
   );
